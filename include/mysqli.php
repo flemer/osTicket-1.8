@@ -39,18 +39,24 @@ function db_connect($host, $user, $passwd, $options = array()) {
         return NULL;
 
     $port = ini_get("mysqli.default_port");
+    $socket = ini_get("mysqli.default_socket");
     if (strpos($host, ':') !== false) {
-        list($host, $port) = explode(':', $host);
+        list($host, $portspec) = explode(':', $host);
         // PHP may not honor the port number if connecting to 'localhost'
-        if (!strcasecmp($host, 'localhost'))
-            // XXX: Looks like PHP gethostbyname() is IPv4 only
-            $host = gethostbyname($host);
-        $port = (int) $port;
+        if ($portspec && is_numeric($portspec)) {
+            if (!strcasecmp($host, 'localhost'))
+                // XXX: Looks like PHP gethostbyname() is IPv4 only
+                $host = gethostbyname($host);
+            $port = (int) $portspec;
+        }
+        elseif ($portspec) {
+            $socket = $portspec;
+        }
     }
 
     // Connect
     $start = microtime(true);
-    if (!@$__db->real_connect($host, $user, $passwd, null, $port))
+    if (!@$__db->real_connect($host, $user, $passwd, null, $port, $socket))
         return NULL;
 
     //Select the database, if any.
@@ -154,7 +160,7 @@ function db_result($res, $row=0) {
     return $value;
 }
 
-function db_fetch_array($res, $mode=MYSQL_ASSOC) {
+function db_fetch_array($res, $mode=MYSQLI_ASSOC) {
     return ($res) ? db_output($res->fetch_array($mode)) : NULL;
 }
 

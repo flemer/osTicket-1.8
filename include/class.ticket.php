@@ -98,9 +98,6 @@ class Ticket {
         $this->topic = null;
         $this->thread = null;
 
-        //REQUIRED: Preload thread obj - checked on lookup!
-        $this->getThread();
-
         return true;
     }
 
@@ -205,7 +202,7 @@ class Ticket {
 
     function getAuthToken() {
         # XXX: Support variable email address (for CCs)
-        return md5($this->getId() . $this->getEmail() . SECRET_SALT);
+        return md5($this->getId() . strtolower($this->getEmail()) . SECRET_SALT);
     }
 
     function getName(){
@@ -1390,7 +1387,6 @@ class Ticket {
         //If enabled...send alert to staff (New Message Alert)
         if($cfg->alertONNewMessage() && $tpl && $email && ($msg=$tpl->getNewMessageAlertMsgTemplate())) {
 
-            $attachments = $message->getAttachments();
             $msg = $this->replaceVars($msg->asArray(), array('message' => $message));
 
             //Build list of recipients and fire the alerts.
@@ -1416,7 +1412,7 @@ class Ticket {
                 if(!$staff || !$staff->getEmail() || !$staff->isAvailable() || in_array($staff->getEmail(), $sentlist)) continue;
                 $alert = str_replace('%{recipient}', $staff->getFirstName(), $msg['body']);
                 $email->sendAlert($staff->getEmail(), $msg['subj'], $alert,
-                    $attachments, $options);
+                    null, $options);
                 $sentlist[] = $staff->getEmail();
             }
         }
@@ -1461,8 +1457,6 @@ class Ticket {
                 $signature=$dept->getSignature();
             else
                 $signature='';
-
-            $attachments =($cfg->emailAttachments() && $files)?$response->getAttachments():array();
 
             $msg = $this->replaceVars($msg->asArray(),
                 array('response' => $response, 'signature' => $signature));
@@ -1625,8 +1619,6 @@ class Ticket {
 
         if($tpl && ($msg=$tpl->getNoteAlertMsgTemplate()) && $email) {
 
-            $attachments = $note->getAttachments();
-
             $msg = $this->replaceVars($msg->asArray(),
                 array('note' => $note));
 
@@ -1645,7 +1637,6 @@ class Ticket {
             if($cfg->alertDeptManagerONNewNote() && $dept && $dept->getManagerId())
                 $recipients[]=$dept->getManager();
 
-            $attachments = $note->getAttachments();
             $options = array(
                 'inreplyto'=>$note->getEmailMessageId(),
                 'references'=>$note->getEmailReferences());
@@ -1657,7 +1648,7 @@ class Ticket {
                         || $note->getStaffId() == $staff->getId())  //No need to alert the poster!
                     continue;
                 $alert = str_replace('%{recipient}', $staff->getFirstName(), $msg['body']);
-                $email->sendAlert($staff->getEmail(), $msg['subj'], $alert, $attachments,
+                $email->sendAlert($staff->getEmail(), $msg['subj'], $alert, null,
                     $options);
                 $sentlist[] = $staff->getEmail();
             }
@@ -1679,12 +1670,15 @@ class Ticket {
 
     function delete() {
 
+        //delete just orphaned ticket thread & associated attachments.
+        // Fetch thread prior to removing ticket entry
+        $t = $this->getThread();
+
         $sql = 'DELETE FROM '.TICKET_TABLE.' WHERE ticket_id='.$this->getId().' LIMIT 1';
         if(!db_query($sql) || !db_affected_rows())
             return false;
 
-        //delete just orphaned ticket thread & associated attachments.
-        $this->getThread()->delete();
+        $t->delete();
 
         foreach (DynamicFormEntry::forTicket($this->getId()) as $form)
             $form->delete();
@@ -1794,8 +1788,7 @@ class Ticket {
         return ($id
                 && is_numeric($id)
                 && ($ticket= new Ticket($id))
-                && $ticket->getId()==$id
-                && $ticket->getThread())
+                && $ticket->getId()==$id)
             ?$ticket:null;
     }
 
@@ -1839,7 +1832,7 @@ class Ticket {
         if(!$staff || (!is_object($staff) && !($staff=Staff::lookup($staff))) || !$staff->isStaff())
             return null;
 
-        $where = array();
+        $where = array('ticket.staff_id='.db_input($staff->getId()));
         $where2 = '';
 
         if(($teams=$staff->getTeams()))
@@ -1849,7 +1842,7 @@ class Ticket {
             $where[] = 'ticket.dept_id IN('.implode(',', db_input($depts)).') ';
 
         if(!$cfg || !($cfg->showAssignedTickets() || $staff->showAssignedTickets()))
-            $where2 =' AND (ticket.staff_id=0 OR ticket.staff_id='.db_input($staff->getId()).') ';
+            $where2 =' AND ticket.staff_id=0 ';
         $where = implode(' OR ', $where);
         if ($where) $where = 'AND ( '.$where.' ) ';
 
@@ -1977,11 +1970,17 @@ class Ticket {
             $vars['field.'.$f->get('id')] = $f->toString($f->getClean());
 
         // Unpack the basic user information
-        $interesting = array('name', 'email');
-        $user_form = UserForm::getUserForm()->getForm($vars);
-        foreach ($user_form->getFields() as $f)
-            if (in_array($f->get('name'), $interesting))
-                $vars[$f->get('name')] = $f->toString($f->getClean());
+        if ($vars['uid'] && ($user = User::lookup($vars['uid']))) {
+            $vars['email'] = $user->getEmail();
+            $vars['name'] = $user->getName();
+        }
+        else {
+            $interesting = array('name', 'email');
+            $user_form = UserForm::getUserForm()->getForm($vars);
+            foreach ($user_form->getFields() as $f)
+                if (in_array($f->get('name'), $interesting))
+                    $vars[$f->get('name')] = $f->toString($f->getClean());
+        }
 
         //Init ticket filters...
         $ticket_filter = new TicketFilter($origin, $vars);
@@ -2033,11 +2032,6 @@ class Ticket {
         }
 
         if (!$errors) {
-
-            if ($vars['uid'] && ($user = User::lookup($vars['uid']))) {
-                $vars['email'] = $user->getEmail();
-                $vars['name'] = $user->getName();
-            }
 
             # Perform ticket filter actions on the new ticket arguments
             if ($ticket_filter) $ticket_filter->apply($vars);

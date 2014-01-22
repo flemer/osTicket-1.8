@@ -24,32 +24,32 @@ $info=Format::htmlchars(($errors && $_POST)?$_POST:$info);
     <tbody>
         <tr>
             <th colspan="2">
-                <em><strong>Client Information</strong>: </em>
+                <em><strong>User Information</strong>: </em>
             </th>
         </tr>
         <?php
         if ($user) { ?>
-        <tr><td>Client:</td><td>
-            <div id="client-info">
+        <tr><td>User:</td><td>
+            <div id="user-info">
                 <input type="hidden" name="uid" id="uid" value="<?php echo $user->getId(); ?>" />
             <a href="#" onclick="javascript:
                 $.userLookup('ajax.php/users/<?php echo $user->getId(); ?>/edit',
                         function (user) {
-                            $('#client-name').text(user.name);
-                            $('#client-email').text(user.email);
+                            $('#user-name').text(user.name);
+                            $('#user-email').text(user.email);
                         });
                 return false;
                 "><i class="icon-user"></i>
-                <span id="client-name"><?php echo $user->getName(); ?></span>
-                &lt;<span id="client-email"><?php echo $user->getEmail(); ?></span>&gt;
+                <span id="user-name"><?php echo $user->getName(); ?></span>
+                &lt;<span id="user-email"><?php echo $user->getEmail(); ?></span>&gt;
                 </a>
                 <a class="action-button" style="float:none;overflow:inherit" href="#"
                     onclick="javascript:
                         $.userLookup('ajax.php/users/select/'+$('input#uid').val(),
                             function(user) {
                                 $('input#uid').val(user.id);
-                                $('#client-name').text(user.name);
-                                $('#client-email').text('<'+user.email+'>');
+                                $('#user-name').text(user.name);
+                                $('#user-email').text('<'+user.email+'>');
                         });
                         return false;
                 "><i class="icon-edit"></i> Change</a>
@@ -66,7 +66,7 @@ $info=Format::htmlchars(($errors && $_POST)?$_POST:$info);
                         autocomplete="off" autocorrect="off" value="<?php echo $info['email']; ?>" /> </span>
                 <font class="error">* <?php echo $errors['email']; ?></font>
             </td>
-        </td>
+        </tr>
         <tr>
             <td width="160" class="required"> Full Name: </td>
             <td>
@@ -74,7 +74,7 @@ $info=Format::htmlchars(($errors && $_POST)?$_POST:$info);
                     <input type="text" size=45 name="name" id="user-name" value="<?php echo $info['name']; ?>" /> </span>
                 <font class="error">* <?php echo $errors['name']; ?></font>
             </td>
-        </td>
+        </tr>
         <?php
         } ?>
 
@@ -221,23 +221,23 @@ $info=Format::htmlchars(($errors && $_POST)?$_POST:$info);
                 </select>&nbsp;<span class='error'>&nbsp;<?php echo $errors['assignId']; ?></span>
             </td>
         </tr>
-        <?php
-        }
-        $tform = TicketForm::getInstance()->getForm($_POST);
-        if ($_POST) $tform->isValid();
-        $tform->render(true);
-        ?>
+        <?php } ?>
         </tbody>
         <tbody id="dynamic-form">
         <?php
             if ($form) $form->getForm()->render(true);
         ?>
         </tbody>
+        <tbody> <?php
+        $tform = TicketForm::getInstance()->getForm($_POST);
+        if ($_POST) $tform->isValid();
+        $tform->render(true);
+        ?>
+        </tbody>
         <tbody>
         <?php
         //is the user allowed to post replies??
-        if($thisstaff->canPostReply()) {
-            ?>
+        if($thisstaff->canPostReply()) { ?>
         <tr>
             <th colspan="2">
                 <em><strong>Response</strong>: Optional response to the above issue.</em>
@@ -373,6 +373,15 @@ $(function() {
         property: "/bin/true"
     });
 
+   <?php
+    // Popup user lookup on the initial page load (not post) if we don't have a
+    // user selected
+    if (!$_POST && !$user) {?>
+    $.userLookup('ajax.php/users/lookup/form', function (user) {
+        window.location.href = window.location.href+'&uid='+user.id;
+     });
+    <?php
+    } ?>
 });
 </script>
 

@@ -175,7 +175,7 @@ class Bootstrap {
         require(INCLUDE_DIR.'class.log.php');
         require(INCLUDE_DIR.'class.crypto.php');
         require(INCLUDE_DIR.'class.timezone.php');
-        require(INCLUDE_DIR.'class.signal.php');
+        require_once(INCLUDE_DIR.'class.signal.php');
         require(INCLUDE_DIR.'class.nav.php');
         require(INCLUDE_DIR.'class.page.php');
         require_once(INCLUDE_DIR.'class.format.php'); //format helpers
@@ -261,7 +261,11 @@ class Bootstrap {
 }
 
 #Get real path for root dir ---linux and windows
-define('ROOT_DIR',str_replace('\\', '/', realpath(dirname(__FILE__))).'/');
+$here = dirname(__FILE__);
+$here = ($h = realpath($here)) ? $h : $here;
+define('ROOT_DIR',str_replace('\\', '/', $here.'/'));
+unset($here); unset($h);
+
 define('INCLUDE_DIR',ROOT_DIR.'include/'); //Change this if include is moved outside the web path.
 define('PEAR_DIR',INCLUDE_DIR.'pear/');
 define('SETUP_DIR',ROOT_DIR.'setup/');

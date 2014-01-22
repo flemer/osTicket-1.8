@@ -224,6 +224,17 @@ class FormField {
         # form
         if ($this->get('required') && !$value && $this->hasData())
             $this->_errors[] = sprintf('%s is a required field', $this->getLabel());
+
+        # Perform declared validators for the field
+        if ($vs = $this->get('validators')) {
+            if (is_array($vs)) {
+                foreach ($vs as $validator)
+                    if (is_callable($validator))
+                        $validator($this, $value);
+            }
+            elseif (is_callable($vs))
+                $vs($this, $value);
+        }
     }
 
     /**
@@ -284,7 +295,7 @@ class FormField {
      * $value - PHP value of the field's content
      */
     function toString($value) {
-        return $value;
+        return (string) $value;
     }
 
     /**
@@ -432,6 +443,14 @@ class FormField {
      */
     function isPresentationOnly() {
         return $this->presentation_only;
+    }
+
+    /**
+     * Indicates if the field places data in the `value_id` column. This
+     * is currently used by the materialized view system
+     */
+    function hasIdValue() {
+        return false;
     }
 
     function getConfigurationForm() {
@@ -634,6 +653,16 @@ class ChoiceField extends FormField {
                 entries if the list item names change',
                 'configuration'=>array('html'=>false)
             )),
+            'default' => new TextboxField(array(
+                'id'=>3, 'label'=>'Default', 'required'=>false, 'default'=>'',
+                'hint'=>'(Enter a key). Value selected from the list initially',
+                'configuration'=>array('size'=>20, 'length'=>40),
+            )),
+            'prompt' => new TextboxField(array(
+                'id'=>2, 'label'=>'Prompt', 'required'=>false, 'default'=>'',
+                'hint'=>'Text shown in the drop-down select before a value is selected',
+                'configuration'=>array('size'=>40, 'length'=>40),
+            )),
         );
     }
 
@@ -787,12 +816,21 @@ class PriorityField extends ChoiceField {
         return $widget;
     }
 
+    function hasIdValue() {
+        return true;
+    }
+    function isChangeable() {
+        return $this->getForm()->get('type') != 'T' ||
+            $this->get('name') != 'priority';
+    }
+
     function getChoices() {
-        $this->ht['default'] = 0;
+        global $cfg;
+        $this->ht['default'] = $cfg->getDefaultPriorityId();
 
         $sql = 'SELECT priority_id, priority_desc FROM '.PRIORITY_TABLE
               .' ORDER BY priority_urgency DESC';
-        $choices = array(0 => '&mdash; Default &mdash;');
+        $choices = array();
         if (!($res = db_query($sql)))
             return $choices;
 
@@ -933,13 +971,19 @@ class ChoicesWidget extends Widget {
         $config = $this->field->getConfiguration();
         // Determine the value for the default (the one listed if nothing is
         // selected)
-        $def_key = $this->field->get('default');
         $choices = $this->field->getChoices();
+        $def_key = $this->field->get('default');
+        if (!$def_key && $config['default'])
+            $def_key = $config['default'];
         $have_def = isset($choices[$def_key]);
         if (!$have_def)
-            $def_val = 'Select '.$this->field->get('label');
+            $def_val = ($config['prompt'])
+               ? $config['prompt'] : 'Select';
         else
             $def_val = $choices[$def_key];
+        $value = $this->value;
+        if ($value === null && $have_def)
+            $value = $def_key;
         ?> <span style="display:inline-block">
         <select name="<?php echo $this->name; ?>">
             <?php if (!$have_def) { ?>
@@ -950,7 +994,7 @@ class ChoicesWidget extends Widget {
                 if (!$have_def && $key == $def_key)
                     continue; ?>
                 <option value="<?php echo $key; ?>" <?php
-                    if ($this->value == $key) echo 'selected="selected"';
+                    if ($value == $key) echo 'selected="selected"';
                 ?>><?php echo $name; ?></option>
             <?php } ?>
         </select>
@@ -1105,6 +1149,7 @@ class ThreadEntryWidget extends Widget {
         <input type="file" class="multifile" name="attachments[]" id="attachments" size="30" value="" />
         </div>
         <font class="error">&nbsp;<?php echo $errors['attachments']; ?></font>
+        </div>
         <hr/>
         <?php
         }

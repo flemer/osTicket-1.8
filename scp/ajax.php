@@ -21,6 +21,7 @@ function staffLoginPage($msg='Unauthorized') {
     exit;
 }
 
+define('AJAX_REQUEST', 1);
 require('staff.inc.php');
 
 //Clean house...don't let the world see your crap.
@@ -74,7 +75,7 @@ $dispatcher = patterns('',
         url_get('^(?P<tid>\d+)/user$', 'viewUser'),
         url_post('^(?P<tid>\d+)/user$', 'updateUser'),
         url_get('^(?P<tid>\d+)/preview', 'previewTicket'),
-        url_post('^(?P<tid>\d+)/lock', 'acquireLock'),
+        url_post('^(?P<tid>\d+)/lock$', 'acquireLock'),
         url_post('^(?P<tid>\d+)/lock/(?P<id>\d+)/renew', 'renewLock'),
         url_post('^(?P<tid>\d+)/lock/(?P<id>\d+)/release', 'releaseLock'),
         url_get('^lookup', 'lookup'),

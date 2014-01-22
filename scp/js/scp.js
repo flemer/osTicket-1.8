@@ -148,7 +148,12 @@ $(document).ready(function(){
      });
 
     $('select#tpl_options').change(function() {
-        $(this).closest('form').submit();
+        var $this = $(this), form = $this.closest('form');
+        if ($this.val() % 1 !== 0) {
+            $('[name="a"]', form).val('implement');
+            $this.attr('name', 'code_name');
+        }
+        form.submit();
      });
 
     $(".clearrule").live('click',function() {
@@ -293,7 +298,7 @@ $(document).ready(function(){
             showButtonPanel: true,
             buttonImage: './images/cal.png',
             showOn:'both',
-            dateFormat: $.translate_format(c.date_format||'m/d/Y'),
+            dateFormat: $.translate_format(c.date_format||'m/d/Y')
         });
         $(document).on('submit', 'form', function() {
             $('.dp', $(this)).each(function(i, e) {
@@ -389,15 +394,6 @@ $(document).ready(function(){
         $('#overlay').show();
         $('#advanced-search').show();
     });
-
-
-    $(document).on('click', 'a#new-ticket', function(e) {
-        e.preventDefault();
-        var $elem = $(this);
-        $.userLookup('ajax.php/users/lookup/form', function (user) {
-            window.location.href = $elem.attr('href')+'&uid='+user.id;
-           });
-     });
 
     $.userLookup = function (url, callback) {
 
