@@ -339,18 +339,21 @@ if ($results) {
             if($showassigned ) {
                 //Closed by
                 if(!strcasecmp($status,'closed')) { ?>
-                    <th width="150">
+                    <th>
                         <a <?php echo $staff_sort; ?> href="tickets.php?sort=staff&order=<?php echo $negorder; ?><?php echo $qstr; ?>"
                             title="Sort By Closing Staff Name <?php echo $negorder; ?>">Closed By</a></th>
                 <?php
                 } else { //assigned to ?>
-                    <th width="150">
+                <th>
+                    <a <?php echo $dept_sort; ?> href="tickets.php?sort=dept&order=<?php echo $negorder;?><?php echo $qstr; ?>"
+                        title="Sort By Department <?php echo $negorder; ?>">Department</a></th>
+                    <th>
                         <a <?php echo $assignee_sort; ?> href="tickets.php?sort=assignee&order=<?php echo $negorder; ?><?php echo $qstr; ?>"
                             title="Sort By Assignee <?php echo $negorder;?>">Assigned To</a></th>
                 <?php
                 }
             } else { ?>
-                <th width="150">
+                <th>
                     <a <?php echo $dept_sort; ?> href="tickets.php?sort=dept&order=<?php echo $negorder;?><?php echo $qstr; ?>"
                         title="Sort By Department <?php echo $negorder; ?>">Department</a></th>
             <?php
@@ -423,6 +426,7 @@ if ($results) {
                 <?php
                 }
                 ?>
+                <td><?php echo $row['dept_name'] ?></td>
                 <td nowrap>&nbsp;<?php echo $lc; ?></td>
             </tr>
             <?php
