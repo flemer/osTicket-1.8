@@ -61,13 +61,15 @@ $qwhere ='';
 
 $depts=$thisstaff->getDepts();
 $qwhere =' WHERE ( '
-        .'  ticket.staff_id='.db_input($thisstaff->getId());
+        .'  ( ticket.staff_id='.db_input($thisstaff->getId())
+        .' AND ticket.status="open")';
 
 if(!$thisstaff->showAssignedOnly())
     $qwhere.=' OR ticket.dept_id IN ('.($depts?implode(',', db_input($depts)):0).')';
 
 if(($teams=$thisstaff->getTeams()) && count(array_filter($teams)))
-    $qwhere.=' OR ticket.team_id IN('.implode(',', db_input(array_filter($teams))).') ';
+    $qwhere.=' OR (ticket.team_id IN ('.implode(',', db_input(array_filter($teams)))
+            .') AND ticket.status="open")';
 
 $qwhere .= ' )';
 
@@ -88,13 +90,13 @@ if($staffId && ($staffId==$thisstaff->getId())) { //My tickets
     $qwhere.=' AND ticket.staff_id='.db_input($staffId);
     $showassigned=false; //My tickets...already assigned to the staff.
 }elseif($showoverdue) { //overdue
-    $qwhere.=' AND isoverdue=1 ';
+    $qwhere.=' AND ticket.isoverdue=1 ';
 }elseif($showanswered) { ////Answered
-    $qwhere.=' AND isanswered=1 ';
+    $qwhere.=' AND ticket.isanswered=1 ';
 }elseif(!strcasecmp($status, 'open') && !$search) { //Open queue (on search OPEN means all open tickets - regardless of state).
     //Showing answered tickets on open queue??
     if(!$cfg->showAnsweredTickets())
-        $qwhere.=' AND isanswered=0 ';
+        $qwhere.=' AND ticket.isanswered=0 ';
 
     /* Showing assigned tickets on open queue?
        Don't confuse it with show assigned To column -> F'it it's confusing - just trust me!
@@ -144,10 +146,10 @@ if ($_REQUEST['advsid'] && isset($_SESSION['adv_'.$_REQUEST['advsid']])) {
         db_input($_SESSION['adv_'.$_REQUEST['advsid']])).')';
 }
 
-$sortOptions=array('date'=>'effective_date','ID'=>'`number`',
-    'pri'=>'priority_urgency','name'=>'user.name','subj'=>'subject',
+$sortOptions=array('date'=>'effective_date','ID'=>'ticket.`number`',
+    'pri'=>'pri.priority_urgency','name'=>'user.name','subj'=>'cdata.subject',
     'status'=>'ticket.status','assignee'=>'assigned','staff'=>'staff',
-    'dept'=>'dept_name');
+    'dept'=>'dept.dept_name');
 
 $orderWays=array('DESC'=>'DESC','ASC'=>'ASC');
 
@@ -180,26 +182,26 @@ if(!$order_by ) {
     elseif(!strcasecmp($status,'closed'))
         $order_by='ticket.closed, ticket.created'; //No priority sorting for closed tickets.
     elseif($showoverdue) //priority> duedate > age in ASC order.
-        $order_by='priority_urgency ASC, ISNULL(duedate) ASC, duedate ASC, effective_date ASC, ticket.created';
+        $order_by='pri.priority_urgency ASC, ISNULL(ticket.duedate) ASC, ticket.duedate ASC, effective_date ASC, ticket.created';
     else //XXX: Add due date here?? No -
-        $order_by='priority_urgency ASC, effective_date DESC, ticket.created';
+        $order_by='pri.priority_urgency ASC, effective_date DESC, ticket.created';
 }
 
 $order=$order?$order:'DESC';
 if($order_by && strpos($order_by,',') && $order)
     $order_by=preg_replace('/(?<!ASC|DESC),/', " $order,", $order_by);
 
-$sort=$_REQUEST['sort']?strtolower($_REQUEST['sort']):'priority_urgency'; //Urgency is not on display table.
+$sort=$_REQUEST['sort']?strtolower($_REQUEST['sort']):'pri.priority_urgency'; //Urgency is not on display table.
 $x=$sort.'_sort';
 $$x=' class="'.strtolower($order).'" ';
 
 if($_GET['limit'])
     $qstr.='&limit='.urlencode($_GET['limit']);
 
-$qselect ='SELECT ticket.ticket_id,lock_id,`number`,ticket.dept_id,ticket.staff_id,ticket.team_id '
+$qselect ='SELECT ticket.ticket_id,tlock.lock_id,ticket.`number`,ticket.dept_id,ticket.staff_id,ticket.team_id '
     .' ,user.name'
-    .' ,email.address as email, dept_name '
-         .' ,ticket.status,ticket.source,isoverdue,isanswered,ticket.created ';
+    .' ,email.address as email, dept.dept_name '
+         .' ,ticket.status,ticket.source,ticket.isoverdue,ticket.isanswered,ticket.created ';
 
 $qfrom=' FROM '.TICKET_TABLE.' ticket '.
        ' LEFT JOIN '.USER_TABLE.' user ON user.id = ticket.user_id'.

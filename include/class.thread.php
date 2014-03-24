@@ -113,9 +113,17 @@ class Thread {
         if(!$order || !in_array($order, array('DESC','ASC')))
             $order='ASC';
 
-        $sql='SELECT thread.* '
+        $sql='SELECT thread.*
+               , COALESCE(user.name,
+                    IF(staff.staff_id,
+                        CONCAT_WS(" ", staff.firstname, staff.lastname),
+                        NULL)) as name '
             .' ,count(DISTINCT attach.attach_id) as attachments '
             .' FROM '.TICKET_THREAD_TABLE.' thread '
+            .' LEFT JOIN '.USER_TABLE.' user
+                ON (thread.user_id=user.id) '
+            .' LEFT JOIN '.STAFF_TABLE.' staff
+                ON (thread.staff_id=staff.staff_id) '
             .' LEFT JOIN '.TICKET_ATTACHMENT_TABLE.' attach
                 ON (thread.ticket_id=attach.ticket_id
                         AND thread.id=attach.ref_id) '
@@ -178,13 +186,11 @@ class Thread {
 
     function delete() {
 
-        /* XXX: Leave this out until TICKET_EMAIL_INFO_TABLE has a primary
-         *      key
-        $sql = 'DELETE mid.* FROM '.TICKET_EMAIL_INFO_TABLE.' mid
+        $sql = 'UPDATE '.TICKET_EMAIL_INFO_TABLE.' mid
             INNER JOIN '.TICKET_THREAD_TABLE.' thread ON (thread.id = mid.thread_id)
-            WHERE thread.ticket_id = '.db_input($this->getTicketId());
+            SET mid.headers = null WHERE thread.ticket_id = '
+            .db_input($this->getTicketId());
         db_query($sql);
-         */
 
         $res=db_query('DELETE FROM '.TICKET_THREAD_TABLE.' WHERE ticket_id='.db_input($this->getTicketId()));
         if(!$res || !db_affected_rows())
@@ -240,7 +246,7 @@ Class ThreadEntry {
         if(!$id && !($id=$this->getId()))
             return false;
 
-        $sql='SELECT thread.*, info.email_mid '
+        $sql='SELECT thread.*, info.email_mid, info.headers '
             .' ,count(DISTINCT attach.attach_id) as attachments '
             .' FROM '.TICKET_THREAD_TABLE.' thread '
             .' LEFT JOIN '.TICKET_EMAIL_INFO_TABLE.' info
@@ -332,18 +338,18 @@ Class ThreadEntry {
         return $this->ht['email_mid'];
     }
 
-    function getEmailHeaders() {
+    function getEmailHeaderArray() {
         require_once(INCLUDE_DIR.'class.mailparse.php');
 
-        $sql = 'SELECT headers FROM '.TICKET_EMAIL_INFO_TABLE
-            .' WHERE thread_id='.$this->getId();
-        $headers = db_result(db_query($sql));
-        return Mail_Parse::splitHeaders($headers);
+        if (!isset($this->ht['@headers']))
+            $this->ht['@headers'] = Mail_Parse::splitHeaders($this->ht['headers']);
+
+        return $this->ht['@headers'];
     }
 
     function getEmailReferences() {
         if (!isset($this->_references)) {
-            $headers = self::getEmailHeaders();
+            $headers = self::getEmailHeaderArray();
             if (isset($headers['References']) && $headers['References'])
                 $this->_references = $headers['References']." ";
             $this->_references .= $this->getEmailMessageId();
@@ -362,7 +368,10 @@ Class ThreadEntry {
     }
 
     function getEmailReferencesForUser($user) {
-        return $this->getTaggedEmailReferences('u', $user->getId());
+        return $this->getTaggedEmailReferences('u',
+            ($user instanceof Collaborator)
+                ? $user->getUserId()
+                : $user->getId());
     }
 
     function getEmailReferencesForStaff($staff) {
@@ -418,8 +427,8 @@ Class ThreadEntry {
     function isAutoReply() {
 
         if (!isset($this->is_autoreply))
-            $this->is_autoreply = $this->getEmailHeader()
-                ?  TicketFilter::isAutoReply($this->getEmailHeader()) : false;
+            $this->is_autoreply = $this->getEmailHeaderArray()
+                ?  TicketFilter::isAutoReply($this->getEmailHeaderArray()) : false;
 
         return $this->is_autoreply;
     }
@@ -427,8 +436,8 @@ Class ThreadEntry {
     function isBounce() {
 
         if (!isset($this->is_bounce))
-            $this->is_bounce = $this->getEmailHeader()
-                ? TicketFilter::isBounce($this->getEmailHeader()) : false;
+            $this->is_bounce = $this->getEmailHeaderArray()
+                ? TicketFilter::isBounce($this->getEmailHeaderArray()) : false;
 
         return $this->is_bounce;
     }
@@ -514,10 +523,10 @@ Class ThreadEntry {
             return 0;
 
         // TODO: Add a unique index to TICKET_ATTACHMENT_TABLE (file_id,
-        // ticket_id), and remove this block
+        // ref_id), and remove this block
         if ($id = db_result(db_query('SELECT attach_id FROM '.TICKET_ATTACHMENT_TABLE
-                .' WHERE file_id='.db_input($fileId).' AND ticket_id='
-                .db_input($this->getTicketId()))))
+                .' WHERE file_id='.db_input($fileId).' AND ref_id='
+                .db_input($this->getId()))))
             return $id;
 
         $sql ='INSERT IGNORE INTO '.TICKET_ATTACHMENT_TABLE.' SET created=NOW() '
@@ -602,6 +611,8 @@ Class ThreadEntry {
      *      - body - (string) email message body (decoded)
      */
     function postEmail($mailinfo) {
+        global $ost;
+
         // +==================+===================+=============+
         // | Orig Thread-Type | Reply Thread-Type | Requires    |
         // +==================+===================+=============+
@@ -620,6 +631,28 @@ Class ThreadEntry {
             // Reporting success so the email can be moved or deleted.
             return true;
 
+        // Mail sent by this system will have a message-id format of
+        // <code-random-mailbox@domain.tld>
+        // where code is a predictable string based on the SECRET_SALT of
+        // this osTicket installation. If this incoming mail matches the
+        // code, then it very likely originated from this system and looped
+        @list($code) = explode('-', $mailinfo['mid'], 2);
+        if (0 === strcasecmp(ltrim($code, '<'), substr(md5('mail'.SECRET_SALT), -9))) {
+            // This mail was sent by this system. It was received due to
+            // some kind of mail delivery loop. It should not be considered
+            // a response to an existing thread entry
+            if ($ost) $ost->log(LOG_ERR, 'Email loop detected', sprintf(
+               'It appears as though &lt;%s&gt; is being used as a forwarded or
+                fetched email account and is also being used as a user /
+                system account. Please correct the loop or seek technical
+                assistance.', $mailinfo['email']),
+                // This is quite intentional -- don't continue the loop
+                false,
+                // Force the message, even if logging is disabled
+                true);
+            return true;
+        }
+
         $vars = array(
             'mid' =>    $mailinfo['mid'],
             'header' => $mailinfo['header'],
@@ -630,6 +663,7 @@ Class ThreadEntry {
             'ip' =>     '',
             'reply_to' => $this,
             'recipients' => $mailinfo['recipients'],
+            'to-email-id' => $mailinfo['to-email-id'],
         );
         $errors = array();
 
@@ -854,7 +888,65 @@ Class ThreadEntry {
             }
         }
 
+        // Search for the message-id token in the body
+        if (preg_match('`(?:data-mid="|Ref-Mid: )([^"\s]*)(?:$|")`',
+                $mailinfo['message'], $match))
+            if ($thread = ThreadEntry::lookupByMessageId($match[1]))
+                   return $thread;
+
         return null;
+    }
+
+    /**
+     * Find a thread entry from a message-id created from the
+     * ::asMessageId() method
+     */
+    function lookupByMessageId($mid, $from) {
+        $mid = trim($mid, '<>');
+        list($ver, $ids, $mails) = explode('$', $mid, 3);
+
+        // Current version is <null>
+        if ($ver !== '')
+            return false;
+
+        $ids = @unpack('Vthread', base64_decode($ids));
+        if (!$ids || !$ids['thread'])
+            return false;
+
+        $thread = ThreadEntry::lookup($ids['thread']);
+        if (!$thread)
+            return false;
+
+        if (0 === strcasecmp($thread->asMessageId($from, $ver), $mid))
+            return $thread;
+    }
+
+    /**
+     * Get an email message-id that can be used to represent this thread
+     * entry. The same message-id can be passed to ::lookupByMessageId() to
+     * find this thread entry
+     *
+     * Formats:
+     * Initial (version <null>)
+     * <$:b32(thread-id)$:md5(to-addr.ticket-num.ticket-id)@:md5(url)>
+     *      thread-id - thread-id, little-endian INT, packed
+     *      :b32() - base32 encoded
+     *      to-addr - individual email recipient
+     *      ticket-num - external ticket number
+     *      ticket-id - internal ticket id
+     *      :md5() - last 10 hex chars of MD5 sum
+     *      url - helpdesk URL
+     */
+    function asMessageId($to, $version=false) {
+        global $ost;
+
+        $domain = md5($ost->getConfig()->getURL());
+        $ticket = $this->getTicket();
+        return sprintf('$%s$%s@%s',
+            base64_encode(pack('V', $this->getId())),
+            substr(md5($to . $ticket->getNumber() . $ticket->getId()), -10),
+            substr($domain, -10)
+        );
     }
 
     //new entry ... we're trusting the caller to check validity of the data.
@@ -873,8 +965,22 @@ Class ThreadEntry {
                 $vars['body'] = new TextThreadBody($vars['body']);
         }
 
+        // Drop stripped images. NOTE: This should be done before
+        // ->convert() because the strippedImages list will not propagate to
+        // the newly converted thread body
+        if ($vars['attachments']) {
+            foreach ($vars['body']->getStrippedImages() as $cid) {
+                foreach ($vars['attachments'] as $i=>$a) {
+                    if (@$a['cid'] && $a['cid'] == $cid) {
+                        // Inline referenced attachment was stripped
+                        unset($vars['attachments']);
+                    }
+                }
+            }
+        }
+
         if (!($body = Format::sanitize(
-                        (string) $vars['body']->convertTo('html'))))
+                (string) $vars['body']->convertTo('html'))))
             $body = '-'; //Special tag used to signify empty message as stored.
 
         $poster = $vars['poster'];
@@ -924,7 +1030,7 @@ Class ThreadEntry {
         //Emailed or API attachments
         if (isset($vars['attachments']) && $vars['attachments']) {
             $entry->importAttachments($vars['attachments']);
-            foreach ($vars['attachments'] as &$a) {
+            foreach ($vars['attachments'] as $a) {
                 // Change <img src="cid:"> inside the message to point to
                 // a unique hash-code for the attachment. Since the
                 // content-id will be discarded, only the unique hash-code
@@ -934,7 +1040,6 @@ Class ThreadEntry {
                         'src="cid:'.$a['key'].'"', $body);
                 }
             }
-            unset($a);
             $sql = 'UPDATE '.TICKET_THREAD_TABLE.' SET body='.db_input($body)
                 .' WHERE `id`='.db_input($entry->getId());
             if (!db_query($sql) || !db_affected_rows())
@@ -1124,6 +1229,7 @@ class ThreadBody /* extends SplString */ {
 
     var $body;
     var $type;
+    var $stripped_images = array();
 
     function __construct($body, $type='text') {
         $type = strtolower($type);
@@ -1153,9 +1259,27 @@ class ThreadBody /* extends SplString */ {
         if (!$tag || strpos($this->body, $tag) === false)
             return;
 
-        if ((list($msg) = explode($tag, $this->body, 2)) && trim($msg))
+        // Capture a list of inline images
+        $images_before = $images_after = array();
+        preg_match_all('/src="cid:([\w_-]+)(?:@|")/', $this->body, $images_before,
+            PREG_PATTERN_ORDER);
+
+        // Strip the quoted part of the body
+        if ((list($msg) = explode($tag, $this->body, 2)) && trim($msg)) {
             $this->body = $msg;
 
+            // Capture a list of dropped inline images
+            if ($images_before) {
+                preg_match_all('/src="cid:([\w_-]+)(?:@|")/', $this->body,
+                    $images_after, PREG_PATTERN_ORDER);
+                $this->stripped_images = array_diff($images_before[1],
+                    $images_after[1]);
+            }
+        }
+    }
+
+    function getStrippedImages() {
+        return $this->stripped_images;
     }
 
     function __toString() {

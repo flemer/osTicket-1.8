@@ -183,7 +183,7 @@ jQuery(function() {
 
 
     //Ticket preview
-    $('.ticketPreview').live('mouseover click', function(e) {
+    $('.ticketPreview').live('mouseover', function(e) {
         e.preventDefault();
         var elem = $(this);
 
@@ -212,5 +212,13 @@ jQuery(function() {
     .delegate('.tip_close', 'click', function(e) {
         e.preventDefault();
         $(this).parent().parent().remove();
+    });
+
+    $(document).live('mouseup', function (e) {
+        var container = $('.tip_box');
+        if (!container.is(e.target)
+            && container.has(e.target).length === 0) {
+            container.remove();
+        }
     });
 });

@@ -729,7 +729,8 @@ class DynamicFormEntryAnswer extends VerySimpleModel {
     }
 
     function __toString() {
-        return $this->toString();
+        $v = $this->toString();
+        return is_string($v) ? $v : (string) $this->getValue();
     }
 }
 
@@ -947,6 +948,13 @@ class SelectionField extends FormField {
                 $this->_choices[$i->get('id')] = $i->get('value');
         }
         return $this->_choices;
+    }
+
+    function export($value) {
+        if ($value && is_numeric($value)
+                && ($item = DynamicListItem::lookup($value)))
+            return $item->toString();
+        return $value;
     }
 }
 

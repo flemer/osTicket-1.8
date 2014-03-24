@@ -489,9 +489,6 @@ if($_POST && !$errors):
                     $vars = $_POST;
                     $vars['uid'] = $user? $user->getId() : 0;
 
-                    if($_FILES['attachments'])
-                        $vars['files'] = AttachmentFile::format($_FILES['attachments']);
-
                     if(($ticket=Ticket::open($vars, $errors))) {
                         $msg='Ticket created successfully';
                         $_REQUEST['a']=null;
@@ -545,8 +542,6 @@ if($cfg->showAnsweredTickets()) {
 }
 
 if($stats['assigned']) {
-    if(!$ost->getWarning() && $stats['assigned']>10)
-        $ost->setWarning($stats['assigned'].' tickets assigned to you! Do something about it!');
 
     $nav->addSubMenu(array('desc'=>'My Tickets ('.number_format($stats['assigned']).')',
                            'title'=>'Assigned Tickets',

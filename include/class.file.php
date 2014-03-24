@@ -295,7 +295,7 @@ class AttachmentFile {
         return false;
     }
 
-    function save(&$file, $ft=false) {
+    function save(&$file, $ft='T') {
 
         if (isset($file['data'])) {
             // Allow a callback function to delay or avoid reading or
@@ -343,6 +343,7 @@ class AttachmentFile {
             .',size='.db_input($file['size'])
             .',name='.db_input($file['name'])
             .',`key`='.db_input($file['key'])
+            .',ft='.db_input($ft ?: 'T')
             .',signature='.db_input($file['signature']);
 
         if (!(db_query($sql) && ($id = db_insert_id())))
@@ -354,25 +355,32 @@ class AttachmentFile {
         // Note that this is preferred over $f->open() because the file does
         // not have a valid backend configured yet. ::getBackendForFile()
         // will consider the system configuration for storing the file
-        $bk = self::getBackendForFile($f);
-        if (isset($file['tmp_name'])) {
-            if (!$bk->upload($file['tmp_name']))
-                return false;
+        $bks = array(self::getBackendForFile($f));
+        if (!$bks[0]->getBkChar() !== 'D')
+            $bks[] = new AttachmentChunkedData($f);
+
+        // Consider the selected backen first and then save to database
+        // otherwise.
+        $succeeded = false;
+        foreach ($bks as $bk) {
+            if (isset($file['tmp_name'])) {
+                if ($bk->upload($file['tmp_name'])) {
+                    $succeeded = true; break;
+                }
+            }
+            elseif ($bk->write($file['data']) && $bk->flush()) {
+                $succeeded = true; break;
+            }
+            // Fallthrough to default backend if different?
         }
-        elseif (!$bk->write($file['data']) || !$bk->flush()) {
-            // XXX: Fallthrough to default backend if different?
+        if (!$succeeded) {
+            // Unable to save data (weird)
             return false;
         }
 
-        # XXX: ft does not exists during the upgrade when attachments are
-        #      migrated! Neither does `bk`
-        if ($ft) {
-            $sql = 'UPDATE '.FILE_TABLE.' SET bk='
-                .db_input($bk->getBkChar())
-                .', ft='.db_input($ft)
-                .' WHERE id='.db_input($f->getId());
-            db_query($sql);
-        }
+        $sql = 'UPDATE '.FILE_TABLE.' SET bk='.db_input($bk->getBkChar())
+            .' WHERE id='.db_input($f->getId());
+        db_query($sql);
 
         return $f->getId();
     }

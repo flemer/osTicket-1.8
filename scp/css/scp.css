@@ -546,15 +546,15 @@ a.print {
     border-bottom:1px solid #ddd;
 }
 
-.form_table.fixed {
+table.fixed {
     table-layout: fixed;
     border-collapse: collapse;
     width: 100%;
 }
-.form_table.fixed td {
+table.fixed td {
     width: 180px;
 }
-.form_table.fixed td + td {
+table.fixed td + td {
     width: auto;
 }
 
@@ -1533,4 +1533,18 @@ div.patch {
 }
 .patch-title {
     color: #555;
+}
+
+div.selected-signature {
+    border-top: 1px dotted #aaa;
+    padding: 0.3em 10px 5px;
+    background-color: #f9f9f9;
+    height: 2.5em;
+    overflow-y: hidden;
+    box-shadow: inset 0px -5px 5px -5px rgba(206, 199, 182, 1.0);
+    font-size: 15px;
+    line-height: 1.25rem;
+}
+div.selected-signature .inner {
+    opacity: 0.5;
 }

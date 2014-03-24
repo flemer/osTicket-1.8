@@ -196,7 +196,7 @@ $(document).ready(function(){
                             if (redactor)
                                 redactor.insertHtml(canned.response);
                             else
-                                box.val(canned.response);
+                                box.val(box.val() + canned.response);
                         }
                         else {
                             if (redactor)
@@ -400,11 +400,16 @@ $(document).ready(function(){
         return false;
     });
 
-    $(document).keydown(function(e) {        
-        if (e.keyCode == 27) {
+    $(document).keydown(function(e) {
+
+        if (e.keyCode == 27 && !$('#overlay').is(':hidden')) {
             $('div.dialog').hide();
             $('#overlay').hide();
-        }  
+
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+        }
     });
 
     /* advanced search */
