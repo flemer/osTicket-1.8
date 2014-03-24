@@ -20,8 +20,9 @@ include_once(INCLUDE_DIR.'class.team.php');
 include_once(INCLUDE_DIR.'class.group.php');
 include_once(INCLUDE_DIR.'class.passwd.php');
 include_once(INCLUDE_DIR.'class.user.php');
+include_once(INCLUDE_DIR.'class.auth.php');
 
-class Staff {
+class Staff extends AuthenticatedUser {
 
     var $ht;
     var $id;
@@ -66,6 +67,7 @@ class Staff {
         $this->teams = $this->ht['teams'] = array();
         $this->group = $this->dept = null;
         $this->departments = $this->stats = array();
+        $this->config = new Config('staff.'.$this->id);
 
         //WE have to patch info here to support upgrading from old versions.
         if(($time=strtotime($this->ht['passwdreset']?$this->ht['passwdreset']:$this->ht['added'])))
@@ -83,8 +85,12 @@ class Staff {
         return $this->load();
     }
 
+    function __toString() {
+        return (string) $this->getName();
+    }
+
     function asVar() {
-        return $this->getName();
+        return $this->__toString();
     }
 
     function getHastable() {
@@ -92,7 +98,18 @@ class Staff {
     }
 
     function getInfo() {
-        return $this->getHastable();
+        return $this->config->getInfo() + $this->getHastable();
+    }
+
+    // AuthenticatedUser implementation...
+    // TODO: Move to an abstract class that extends Staff
+    function getRole() {
+        return 'staff';
+    }
+
+    function getAuthBackend() {
+        list($authkey, ) = explode(':', $this->getAuthKey());
+        return StaffAuthenticationBackend::getBackend($authkey);
     }
 
     /*compares user password*/
@@ -118,6 +135,10 @@ class Staff {
 
     function cmp_passwd($password) {
         return $this->check_passwd($password, false);
+    }
+
+    function hasPassword() {
+        return (bool) $this->ht['passwd'];
     }
 
     function forcePasswdRest() {
@@ -256,6 +277,17 @@ class Staff {
         return $this->dept;
     }
 
+    function getLanguage() {
+        static $cached = false;
+        if (!$cached) $cached = &$_SESSION['staff:lang'];
+
+        if (!$cached) {
+            $cached = $this->config->get('lang');
+            if (!$cached)
+                $cached = Internationalization::getDefaultLanguage();
+        }
+        return $cached;
+    }
 
     function isManager() {
         return (($dept=$this->getDept()) && $dept->getManagerId()==$this->getId());
@@ -467,6 +499,9 @@ class Staff {
 
         if($errors) return false;
 
+        $this->config->set('lang', $vars['lang']);
+        $_SESSION['staff:lang'] = null;
+
         $sql='UPDATE '.STAFF_TABLE.' SET updated=NOW() '
             .' ,firstname='.db_input($vars['firstname'])
             .' ,lastname='.db_input($vars['lastname'])
@@ -660,7 +695,7 @@ class Staff {
         //Now set session crap and lets roll baby!
         $_SESSION['_staff'] = array(); //clear.
         $_SESSION['_staff']['userID'] = $user->getId();
-        $user->refreshSession(); //set the hash.
+        $user->refreshSession(true); //set the hash.
         $_SESSION['TZ_OFFSET'] = $user->getTZoffset();
         $_SESSION['TZ_DST'] = $user->observeDaylight();
 
@@ -778,13 +813,17 @@ class Staff {
             $errors['mobile']='Valid number required';
 
         if($vars['passwd1'] || $vars['passwd2'] || !$id) {
-            if(!$vars['passwd1'] && !$id) {
+            if($vars['passwd1'] && strcmp($vars['passwd1'], $vars['passwd2'])) {
+                $errors['passwd2']='Password(s) do not match';
+            }
+            elseif ($vars['backend'] != 'local') {
+                // Password can be omitted
+            }
+            elseif(!$vars['passwd1'] && !$id) {
                 $errors['passwd1']='Temp. password required';
                 $errors['temppasswd']='Required';
             } elseif($vars['passwd1'] && strlen($vars['passwd1'])<6) {
                 $errors['passwd1']='Must be at least 6 characters';
-            } elseif($vars['passwd1'] && strcmp($vars['passwd1'], $vars['passwd2'])) {
-                $errors['passwd2']='Password(s) do not match';
             }
         }
 
@@ -814,6 +853,7 @@ class Staff {
             .' ,firstname='.db_input($vars['firstname'])
             .' ,lastname='.db_input($vars['lastname'])
             .' ,email='.db_input($vars['email'])
+            .' ,backend='.db_input($vars['backend'])
             .' ,phone="'.db_input(Format::phone($vars['phone']),false).'"'
             .' ,phone_ext='.db_input($vars['phone_ext'])
             .' ,mobile="'.db_input(Format::phone($vars['mobile']),false).'"'
@@ -822,10 +862,12 @@ class Staff {
 
         if($vars['passwd1']) {
             $sql.=' ,passwd='.db_input(Passwd::hash($vars['passwd1']));
-        }
 
-        if(isset($vars['change_passwd']))
-            $sql.=' ,change_passwd=1';
+            if(isset($vars['change_passwd']))
+                $sql.=' ,change_passwd=1';
+        }
+        elseif (!isset($vars['change_passwd']))
+            $sql .= ' ,change_passwd=0';
 
         if($id) {
             $sql='UPDATE '.STAFF_TABLE.' '.$sql.' WHERE staff_id='.db_input($id);

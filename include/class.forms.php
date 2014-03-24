@@ -51,9 +51,12 @@ class Form {
     }
 
     function getField($name) {
-        foreach($this->getFields() as $f)
+        $fields = $this->getFields();
+        foreach($fields as $f)
             if(!strcasecmp($f->get('name'), $name))
                 return $f;
+        if (isset($fields[$name]))
+            return $fields[$name];
     }
 
     function getTitle() { return $this->title; }
@@ -82,9 +85,12 @@ class Form {
         if (!$this->_clean) {
             $this->_clean = array();
             foreach ($this->getFields() as $key=>$field) {
+                if (!$field->hasData())
+                    continue;
                 $this->_clean[$key] = $this->_clean[$field->get('name')]
                     = $field->getClean();
             }
+            unset($this->_clean[""]);
         }
         return $this->_clean;
     }
@@ -129,14 +135,14 @@ class FormField {
 
     static $types = array(
         'Basic Fields' => array(
-            'text'  => array('Short Answer', TextboxField),
-            'memo' => array('Long Answer', TextareaField),
-            'thread' => array('Thread Entry', ThreadEntryField, false),
-            'datetime' => array('Date and Time', DatetimeField),
-            'phone' => array('Phone Number', PhoneField),
-            'bool' => array('Checkbox', BooleanField),
-            'choices' => array('Choices', ChoiceField),
-            'break' => array('Section Break', SectionBreakField),
+            'text'  => array('Short Answer', 'TextboxField'),
+            'memo' => array('Long Answer', 'TextareaField'),
+            'thread' => array('Thread Entry', 'ThreadEntryField', false),
+            'datetime' => array('Date and Time', 'DatetimeField'),
+            'phone' => array('Phone Number', 'PhoneField'),
+            'bool' => array('Checkbox', 'BooleanField'),
+            'choices' => array('Choices', 'ChoiceField'),
+            'break' => array('Section Break', 'SectionBreakField'),
         ),
     );
     static $more_types = array();
@@ -305,6 +311,15 @@ class FormField {
         return Format::htmlchars($this->toString($value));
     }
 
+    /**
+     * Returns a value suitable for exporting to a foreign system. Mostly
+     * useful for things like dates and phone numbers which should be
+     * formatted using a standard when exported
+     */
+    function export($value) {
+        return $this->toString($value);
+    }
+
     function getLabel() { return $this->get('label'); }
 
     /**
@@ -467,7 +482,8 @@ class FormField {
         if (!static::$widget)
             throw new Exception('Widget not defined for this field');
         if (!isset($this->_widget)) {
-            $this->_widget = new static::$widget($this);
+            $wc = $this->get('widget') ? $this->get('widget') : static::$widget;
+            $this->_widget = new $wc($this);
             $this->_widget->parseValue();
         }
         return $this->_widget;
@@ -493,6 +509,11 @@ class TextboxField extends FormField {
                 'id'=>4, 'label'=>'Validation Error', 'default'=>'',
                 'configuration'=>array('size'=>40, 'length'=>60),
                 'hint'=>'Message shown to user if the input does not match the validator')),
+            'placeholder' => new TextboxField(array(
+                'id'=>5, 'label'=>'Placeholder', 'required'=>false, 'default'=>'',
+                'hint'=>'Text shown in before any input from the user',
+                'configuration'=>array('size'=>40, 'length'=>40),
+            )),
         );
     }
 
@@ -526,6 +547,18 @@ class TextboxField extends FormField {
     }
 }
 
+class PasswordField extends TextboxField {
+    static $widget = 'PasswordWidget';
+
+    function to_database($value) {
+        return Crypto::encrypt($value, SECRET_SALT, $this->getFormName());
+    }
+
+    function to_php($value) {
+        return Crypto::decrypt($value, SECRET_SALT, $this->getFormName());
+    }
+}
+
 class TextareaField extends FormField {
     static $widget = 'TextareaWidget';
 
@@ -540,6 +573,11 @@ class TextareaField extends FormField {
             'html' => new BooleanField(array(
                 'id'=>4, 'label'=>'HTML', 'required'=>false, 'default'=>true,
                 'configuration'=>array('desc'=>'Allow HTML input in this box'))),
+            'placeholder' => new TextboxField(array(
+                'id'=>5, 'label'=>'Placeholder', 'required'=>false, 'default'=>'',
+                'hint'=>'Text shown in before any input from the user',
+                'configuration'=>array('size'=>40, 'length'=>40),
+            )),
         );
     }
 
@@ -660,7 +698,7 @@ class ChoiceField extends FormField {
             )),
             'prompt' => new TextboxField(array(
                 'id'=>2, 'label'=>'Prompt', 'required'=>false, 'default'=>'',
-                'hint'=>'Text shown in the drop-down select before a value is selected',
+                'hint'=>'Leading text shown before a value is selected',
                 'configuration'=>array('size'=>40, 'length'=>40),
             )),
         );
@@ -734,6 +772,16 @@ class DatetimeField extends FormField {
             return Format::userdate($format, $value);
         else
             return Format::date($format, $value);
+    }
+
+    function export($value) {
+        $config = $this->getConfiguration();
+        if (!$value)
+            return '';
+        elseif ($config['gmt'])
+            return Format::userdate('Y-m-d H:i:s', $value);
+        else
+            return Format::date('Y-m-d H:i:s', $value);
     }
 
     function getConfigurationOptions() {
@@ -858,7 +906,13 @@ class PriorityField extends ChoiceField {
     }
 
     function getConfigurationOptions() {
-        return array();
+        return array(
+            'prompt' => new TextboxField(array(
+                'id'=>2, 'label'=>'Prompt', 'required'=>false, 'default'=>'',
+                'hint'=>'Leading text shown before a value is selected',
+                'configuration'=>array('size'=>40, 'length'=>40),
+            )),
+        );
     }
 }
 FormField::addFieldTypes('Built-in Lists', function() {
@@ -894,6 +948,8 @@ class Widget {
 }
 
 class TextboxWidget extends Widget {
+    static $input_type = 'text';
+
     function render() {
         $config = $this->field->getConfiguration();
         if (isset($config['size']))
@@ -906,13 +962,28 @@ class TextboxWidget extends Widget {
             $autocomplete = 'autocomplete="'.($config['autocomplete']?'on':'off').'"';
         ?>
         <span style="display:inline-block">
-        <input type="text" id="<?php echo $this->name; ?>"
+        <input type="<?php echo static::$input_type; ?>"
+            id="<?php echo $this->name; ?>"
             <?php echo $size . " " . $maxlength; ?>
-            <?php echo $classes.' '.$autocomplete; ?>
+            <?php echo $classes.' '.$autocomplete
+                .' placeholder="'.$config['placeholder'].'"'; ?>
             name="<?php echo $this->name; ?>"
             value="<?php echo Format::htmlchars($this->value); ?>"/>
         </span>
         <?php
+    }
+}
+
+class PasswordWidget extends TextboxWidget {
+    static $input_type = 'password';
+
+    function parseValue() {
+        // Show empty box unless failed POST
+        if ($_SERVER['REQUEST_METHOD'] == 'POST'
+                && $this->field->getForm()->isValid())
+            parent::parseValue();
+        else
+            $this->value = '';
     }
 }
 
@@ -930,7 +1001,8 @@ class TextareaWidget extends Widget {
             $class = 'class="richtext no-bar small"';
         ?>
         <span style="display:inline-block;width:100%">
-        <textarea <?php echo $rows." ".$cols." ".$maxlength." ".$class; ?>
+        <textarea <?php echo $rows." ".$cols." ".$maxlength." ".$class
+                .' placeholder="'.$config['placeholder'].'"'; ?>
             name="<?php echo $this->name; ?>"><?php
                 echo Format::htmlchars($this->value);
             ?></textarea>
@@ -967,20 +1039,27 @@ class PhoneNumberWidget extends Widget {
 }
 
 class ChoicesWidget extends Widget {
-    function render() {
+    function render($mode=false) {
         $config = $this->field->getConfiguration();
         // Determine the value for the default (the one listed if nothing is
         // selected)
         $choices = $this->field->getChoices();
-        $def_key = $this->field->get('default');
-        if (!$def_key && $config['default'])
-            $def_key = $config['default'];
-        $have_def = isset($choices[$def_key]);
-        if (!$have_def)
+        // We don't consider the 'default' when rendering in 'search' mode
+        $have_def = false;
+        if ($mode != 'search') {
+            $def_key = $this->field->get('default');
+            if (!$def_key && $config['default'])
+                $def_key = $config['default'];
+            $have_def = isset($choices[$def_key]);
+            if (!$have_def)
+                $def_val = ($config['prompt'])
+                   ? $config['prompt'] : 'Select';
+            else
+                $def_val = $choices[$def_key];
+        } else {
             $def_val = ($config['prompt'])
-               ? $config['prompt'] : 'Select';
-        else
-            $def_val = $choices[$def_key];
+                ? $config['prompt'] : 'Select';
+        }
         $value = $this->value;
         if ($value === null && $have_def)
             $value = $def_key;

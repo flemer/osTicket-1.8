@@ -363,6 +363,14 @@ jQuery(function($) {
         return false;
     });
 
+    $(document).on('change', 'form#reply select#emailreply', function(e) {
+         var $cc = $('form#reply tbody#cc_sec');
+        if($(this).val() == 0)
+            $cc.hide();
+        else
+            $cc.show();
+     });
+
     var showNonLocalImage = function(div) {
         var $div = $(div),
             $img = $div.append($('<img>')

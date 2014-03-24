@@ -76,9 +76,10 @@ if($status) {
     $qwhere.=' AND ticket.status='.db_input(strtolower($status));
 }
 
-if (isset($_REQUEST['ownerId'])) {
-    $qwhere .= ' AND ticket.user_id='.db_input($_REQUEST['ownerId']);
-    $qstr .= '&ownerId='.urlencode($_REQUEST['ownerId']);
+if (isset($_REQUEST['uid']) && $_REQUEST['uid']) {
+    $qwhere .= ' AND (ticket.user_id='.db_input($_REQUEST['uid'])
+            .' OR collab.user_id='.db_input($_REQUEST['uid']).') ';
+    $qstr .= '&uid='.urlencode($_REQUEST['uid']);
 }
 
 //Queues: Overloaded sub-statuses  - you've got to just have faith!
@@ -115,7 +116,7 @@ if($search):
         $qstr.='&query='.urlencode($searchTerm);
         $queryterm=db_real_escape($searchTerm,false); //escape the term ONLY...no quotes.
         if (is_numeric($searchTerm)) {
-            $qwhere.=" AND ticket.ticketID LIKE '$queryterm%'";
+            $qwhere.=" AND ticket.`number` LIKE '$queryterm%'";
         } elseif (strpos($searchTerm,'@') && Validator::is_email($searchTerm)) {
             //pulling all tricks!
             # XXX: What about searching for email addresses in the body of
@@ -143,8 +144,8 @@ if ($_REQUEST['advsid'] && isset($_SESSION['adv_'.$_REQUEST['advsid']])) {
         db_input($_SESSION['adv_'.$_REQUEST['advsid']])).')';
 }
 
-$sortOptions=array('date'=>'effective_date','ID'=>'ticketID',
-    'pri'=>'priority_id','name'=>'user.name','subj'=>'subject',
+$sortOptions=array('date'=>'effective_date','ID'=>'`number`',
+    'pri'=>'priority_urgency','name'=>'user.name','subj'=>'subject',
     'status'=>'ticket.status','assignee'=>'assigned','staff'=>'staff',
     'dept'=>'dept_name');
 
@@ -179,23 +180,23 @@ if(!$order_by ) {
     elseif(!strcasecmp($status,'closed'))
         $order_by='ticket.closed, ticket.created'; //No priority sorting for closed tickets.
     elseif($showoverdue) //priority> duedate > age in ASC order.
-        $order_by='priority_id, ISNULL(duedate) ASC, duedate ASC, effective_date ASC, ticket.created';
+        $order_by='priority_urgency ASC, ISNULL(duedate) ASC, duedate ASC, effective_date ASC, ticket.created';
     else //XXX: Add due date here?? No -
-        $order_by='priority_id, effective_date DESC, ticket.created';
+        $order_by='priority_urgency ASC, effective_date DESC, ticket.created';
 }
 
 $order=$order?$order:'DESC';
 if($order_by && strpos($order_by,',') && $order)
     $order_by=preg_replace('/(?<!ASC|DESC),/', " $order,", $order_by);
 
-$sort=$_REQUEST['sort']?strtolower($_REQUEST['sort']):'priority_id'; //Urgency is not on display table.
+$sort=$_REQUEST['sort']?strtolower($_REQUEST['sort']):'priority_urgency'; //Urgency is not on display table.
 $x=$sort.'_sort';
 $$x=' class="'.strtolower($order).'" ';
 
 if($_GET['limit'])
     $qstr.='&limit='.urlencode($_GET['limit']);
 
-$qselect ='SELECT ticket.ticket_id,lock_id,ticketID,ticket.dept_id,ticket.staff_id,ticket.team_id '
+$qselect ='SELECT ticket.ticket_id,lock_id,`number`,ticket.dept_id,ticket.staff_id,ticket.team_id '
     .' ,user.name'
     .' ,email.address as email, dept_name '
          .' ,ticket.status,ticket.source,isoverdue,isanswered,ticket.created ';
@@ -205,9 +206,15 @@ $qfrom=' FROM '.TICKET_TABLE.' ticket '.
        ' LEFT JOIN '.USER_EMAIL_TABLE.' email ON user.id = email.user_id'.
        ' LEFT JOIN '.DEPT_TABLE.' dept ON ticket.dept_id=dept.dept_id ';
 
+if ($_REQUEST['uid'])
+    $qfrom.=' LEFT JOIN '.TICKET_COLLABORATOR_TABLE.' collab
+        ON (ticket.ticket_id = collab.ticket_id )';
+
+
 $sjoin='';
+
 if($search && $deep_search) {
-    $sjoin=' LEFT JOIN '.TICKET_THREAD_TABLE.' thread ON (ticket.ticket_id=thread.ticket_id )';
+    $sjoin.=' LEFT JOIN '.TICKET_THREAD_TABLE.' thread ON (ticket.ticket_id=thread.ticket_id )';
 }
 
 //get ticket count based on the query so far..
@@ -224,7 +231,7 @@ $qselect.=' ,IF(ticket.duedate IS NULL,IF(sla.id IS NULL, NULL, DATE_ADD(ticket.
          .' ,CONCAT_WS(" ", staff.firstname, staff.lastname) as staff, team.name as team '
          .' ,IF(staff.staff_id IS NULL,team.name,CONCAT_WS(" ", staff.lastname, staff.firstname)) as assigned '
          .' ,IF(ptopic.topic_pid IS NULL, topic.topic, CONCAT_WS(" / ", ptopic.topic, topic.topic)) as helptopic '
-         .' ,cdata.priority_id, cdata.subject';
+         .' ,cdata.priority_id, cdata.subject, pri.priority_desc, pri.priority_color';
 
 $qfrom.=' LEFT JOIN '.TICKET_LOCK_TABLE.' tlock ON (ticket.ticket_id=tlock.ticket_id AND tlock.expire>NOW()
                AND tlock.staff_id!='.db_input($thisstaff->getId()).') '
@@ -233,15 +240,10 @@ $qfrom.=' LEFT JOIN '.TICKET_LOCK_TABLE.' tlock ON (ticket.ticket_id=tlock.ticke
        .' LEFT JOIN '.SLA_TABLE.' sla ON (ticket.sla_id=sla.id AND sla.isactive=1) '
        .' LEFT JOIN '.TOPIC_TABLE.' topic ON (ticket.topic_id=topic.topic_id) '
        .' LEFT JOIN '.TOPIC_TABLE.' ptopic ON (ptopic.topic_id=topic.topic_pid) '
-       .' LEFT JOIN '.TABLE_PREFIX.'ticket__cdata cdata ON (cdata.ticket_id = ticket.ticket_id) ';
+       .' LEFT JOIN '.TABLE_PREFIX.'ticket__cdata cdata ON (cdata.ticket_id = ticket.ticket_id) '
+       .' LEFT JOIN '.PRIORITY_TABLE.' pri ON (pri.priority_id = cdata.priority_id)';
 
 TicketForm::ensureDynamicDataView();
-
-// Fetch priority information
-$res = db_query('select * from '.PRIORITY_TABLE);
-$prios = array();
-while ($row = db_fetch_array($res))
-    $prios[$row['priority_id']] = $row;
 
 $query="$qselect $qfrom $qwhere ORDER BY $order_by $order LIMIT ".$pageNav->getStart().",".$pageNav->getLimit();
 //echo $query;
@@ -265,11 +267,15 @@ while ($row = db_fetch_array($res)) {
 
 // Fetch attachment and thread entry counts
 if ($results) {
-    $counts_sql = 'SELECT ticket.ticket_id, count(attach.attach_id) as attachments,
-        count(DISTINCT thread.id) as thread_count
+    $counts_sql = 'SELECT ticket.ticket_id,
+        count(DISTINCT attach.attach_id) as attachments,
+        count(DISTINCT thread.id) as thread_count,
+        count(DISTINCT collab.id) as collaborators
         FROM '.TICKET_TABLE.' ticket
         LEFT JOIN '.TICKET_ATTACHMENT_TABLE.' attach ON (ticket.ticket_id=attach.ticket_id) '
      .' LEFT JOIN '.TICKET_THREAD_TABLE.' thread ON ( ticket.ticket_id=thread.ticket_id) '
+     .' LEFT JOIN '.TICKET_COLLABORATOR_TABLE.' collab
+            ON ( ticket.ticket_id=collab.ticket_id) '
      .' WHERE ticket.ticket_id IN ('.implode(',', db_input(array_keys($results))).')
         GROUP BY ticket.ticket_id';
     $ids_res = db_query($counts_sql);
@@ -385,7 +391,7 @@ if ($results) {
                 }else{
                     $lc=Format::truncate($row['dept_name'],40);
                 }
-                $tid=$row['ticketID'];
+                $tid=$row['number'];
                 $subject = Format::htmlchars(Format::truncate($row['subject'],40));
                 $threadcount=$row['thread_count'];
                 if(!strcasecmp($row['status'],'open') && !$row['isanswered'] && !$row['lock_id']) {
@@ -407,11 +413,17 @@ if ($results) {
                   <a class="Icon <?php echo strtolower($row['source']); ?>Ticket ticketPreview" title="Preview Ticket"
                     href="tickets.php?id=<?php echo $row['ticket_id']; ?>"><?php echo $tid; ?></a></td>
                 <td align="center" nowrap><?php echo Format::db_datetime($row['effective_date']); ?></td>
-                <td><a <?php if($flag) { ?> class="Icon <?php echo $flag; ?>Ticket" title="<?php echo ucfirst($flag); ?> Ticket" <?php } ?>
+                <td><a <?php if ($flag) { ?> class="Icon <?php echo $flag; ?>Ticket" title="<?php echo ucfirst($flag); ?> Ticket" <?php } ?>
                     href="tickets.php?id=<?php echo $row['ticket_id']; ?>"><?php echo $subject; ?></a>
-                     &nbsp;
-                     <?php echo ($threadcount>1)?" <small>($threadcount)</small>&nbsp;":''?>
-                     <?php echo $row['attachments']?"<span class='Icon file'>&nbsp;</span>":''; ?>
+                     <?php
+                        if ($threadcount>1)
+                            echo "<small>($threadcount)</small>&nbsp;".'<i
+                                class="icon-fixed-width icon-comments-alt"></i>&nbsp;';
+                        if ($row['collaborators'])
+                            echo '<i class="icon-fixed-width icon-group faded"></i>&nbsp;';
+                        if ($row['attachments'])
+                            echo '<i class="icon-fixed-width icon-paperclip"></i>&nbsp;';
+                    ?>
                 </td>
                 <td nowrap>&nbsp;<?php echo Format::truncate($row['name'],22,strpos($row['name'],'@')); ?>&nbsp;</td>
                 <?php
@@ -421,8 +433,8 @@ if ($results) {
                         $displaystatus="<b>$displaystatus</b>";
                     echo "<td>$displaystatus</td>";
                 } else { ?>
-                <td class="nohover" align="center" style="background-color:<?php echo $prios[$row['priority_id']]['priority_color']; ?>;">
-                    <?php echo $prios[$row['priority_id']]['priority_desc']; ?></td>
+                <td class="nohover" align="center" style="background-color:<?php echo $row['priority_color']; ?>;">
+                    <?php echo $row['priority_desc']; ?></td>
                 <?php
                 }
                 ?>
@@ -626,7 +638,8 @@ if ($results) {
             elseif (!$f->hasData())
                 continue;
             ?><label><?php echo $f->getLabel(); ?>:</label>
-                <div style="display:inline-block;width: 12.5em;"><?php $f->render(); ?></div>
+                <div style="display:inline-block;width: 12.5em;"><?php
+                     $f->render('search'); ?></div>
         <?php } ?>
         </fieldset>
         <p>

@@ -31,6 +31,8 @@ include_once(INCLUDE_DIR.'class.sla.php');
 include_once(INCLUDE_DIR.'class.canned.php');
 require_once(INCLUDE_DIR.'class.dynamic_forms.php');
 require_once(INCLUDE_DIR.'class.user.php');
+require_once(INCLUDE_DIR.'class.collaborator.php');
+
 
 class Ticket {
 
@@ -62,15 +64,16 @@ class Ticket {
             return false;
 
         $sql='SELECT  ticket.*, lock_id, dept_name '
-            .' ,IF(sla.id IS NULL, NULL, DATE_ADD(ticket.created, INTERVAL sla.grace_period HOUR)) as sla_duedate '
-            .' ,count(attach.attach_id) as attachments '
+            .' ,IF(sla.id IS NULL, NULL, '
+                .'DATE_ADD(ticket.created, INTERVAL sla.grace_period HOUR)) as sla_duedate '
+            .' ,count(distinct attach.attach_id) as attachments'
             .' FROM '.TICKET_TABLE.' ticket '
             .' LEFT JOIN '.DEPT_TABLE.' dept ON (ticket.dept_id=dept.dept_id) '
             .' LEFT JOIN '.SLA_TABLE.' sla ON (ticket.sla_id=sla.id AND sla.isactive=1) '
-            .' LEFT JOIN '.TICKET_LOCK_TABLE.' tlock ON ('
-                .'ticket.ticket_id=tlock.ticket_id AND tlock.expire>NOW()) '
-            .' LEFT JOIN '.TICKET_ATTACHMENT_TABLE.' attach ON ('
-                .'ticket.ticket_id=attach.ticket_id) '
+            .' LEFT JOIN '.TICKET_LOCK_TABLE.' tlock
+                ON ( ticket.ticket_id=tlock.ticket_id AND tlock.expire>NOW()) '
+            .' LEFT JOIN '.TICKET_ATTACHMENT_TABLE.' attach
+                ON ( ticket.ticket_id=attach.ticket_id) '
             .' WHERE ticket.ticket_id='.db_input($id)
             .' GROUP BY ticket.ticket_id';
 
@@ -82,7 +85,7 @@ class Ticket {
         $this->ht = db_fetch_array($res);
 
         $this->id       = $this->ht['ticket_id'];
-        $this->number   = $this->ht['ticketID'];
+        $this->number   = $this->ht['number'];
         $this->_answers = array();
 
         $this->loadDynamicData();
@@ -97,6 +100,7 @@ class Ticket {
         $this->stats = null;
         $this->topic = null;
         $this->thread = null;
+        $this->collaborators = null;
 
         return true;
     }
@@ -105,8 +109,8 @@ class Ticket {
         if (!$this->_answers) {
             foreach (DynamicFormEntry::forTicket($this->getId(), true) as $form)
                 foreach ($form->getAnswers() as $answer)
-                    $this->_answers[$answer->getField()->get('name')]
-                        = $answer;
+                    if ($tag = mb_strtolower($answer->getField()->get('name')))
+                        $this->_answers[$tag] = $answer;
         }
     }
 
@@ -152,26 +156,33 @@ class Ticket {
                  || $staff->getId()==$this->getStaffId());
     }
 
-    function checkClientAccess($client) {
-        global $cfg;
+    function checkUserAccess($user) {
 
-        if(!is_object($client) && !($client=Client::lookup($client)))
+        if (!$user || !($user instanceof EndUser))
             return false;
 
-        if(!strcasecmp($client->getEmail(), $this->getEmail()))
+        //Ticket Owner
+        if ($user->getId() == $this->getUserId())
             return true;
 
-        return ($cfg && $cfg->showRelatedTickets()
-            && $client->getTicketId()==$this->getExtId());
+        //Collaborator?
+        // 1) If the user was authorized via this ticket.
+        if ($user->getTicketId() == $this->getId()
+                && !strcasecmp($user->getRole(), 'collaborator'))
+            return true;
+
+        // 2) Query the database to check for expanded access...
+        if (Collaborator::lookup(array(
+                        'userId' => $user->getId(),
+                        'ticketId' => $this->getId())))
+            return true;
+
+        return false;
     }
 
     //Getters
     function getId() {
         return  $this->id;
-    }
-
-    function getExtId() {
-        return  $this->getNumber();
     }
 
     function getNumber() {
@@ -183,9 +194,12 @@ class Ticket {
     }
 
     function getOwner() {
-        if (!isset($this->user))
-            $this->user = User::lookup($this->getOwnerId());
-        return $this->user;
+
+        if (!isset($this->owner)
+                && ($u=User::lookup($this->getOwnerId())))
+            $this->owner = new TicketOwner(new EndUser($u), $this);
+
+        return $this->owner;
     }
 
     function getEmail(){
@@ -361,19 +375,25 @@ class Ticket {
     }
 
     function getDept() {
+        global $cfg;
 
-        if(!$this->dept && $this->getDeptId())
-            $this->dept= Dept::lookup($this->getDeptId());
+        if(!$this->dept)
+            if(!($this->dept = Dept::lookup($this->getDeptId())))
+                $this->dept = $cfg->getDefaultDept();
 
         return $this->dept;
     }
 
-    function getClient() {
+    function getUserId() {
+        return $this->getOwnerId();
+    }
 
-        if(!$this->client)
-            $this->client = Client::lookup($this->getExtId(), $this->getEmail());
+    function getUser() {
 
-        return $this->client;
+        if(!isset($this->user) && $this->getOwner())
+            $this->user = new EndUser($this->getOwner());
+
+        return $this->user;
     }
 
     function getStaffId() {
@@ -548,7 +568,112 @@ class Ticket {
         return $this->getThread()->getEntries($type, $order);
     }
 
+    //Collaborators
+    function getNumCollaborators() {
+        return count($this->getCollaborators());
+    }
 
+    function getNumActiveCollaborators() {
+
+        if (!isset($this->ht['active_collaborators']))
+            $this->ht['active_collaborators'] = count($this->getActiveCollaborators());
+
+        return $this->ht['active_collaborators'];
+    }
+
+    function getActiveCollaborators() {
+        return $this->getCollaborators(array('isactive'=>1));
+    }
+
+
+    function getCollaborators($criteria=array()) {
+
+        if ($criteria)
+            return Collaborator::forTicket($this->getId(), $criteria);
+
+        if (!isset($this->collaborators))
+            $this->collaborators = Collaborator::forTicket($this->getId());
+
+        return $this->collaborators;
+    }
+
+    //UserList of recipients  (owner + collaborators)
+    function getRecipients() {
+
+        if (!isset($this->recipients)) {
+            $list = new UserList();
+            $list->add($this->getOwner());
+            if ($collabs = $this->getActiveCollaborators()) {
+                foreach ($collabs as $c)
+                    $list->add($c);
+            }
+            $this->recipients = $list;
+        }
+
+        return $this->recipients;
+    }
+
+
+    function addCollaborator($user, $vars, &$errors) {
+
+        if (!$user || $user->getId()==$this->getOwnerId())
+            return null;
+
+        $vars = array_merge(array(
+                'ticketId' => $this->getId(),
+                'userId' => $user->getId()), $vars);
+        if (!($c=Collaborator::add($vars, $errors)))
+            return null;
+
+        $this->collaborators = null;
+        $this->recipients = null;
+
+        return $c;
+    }
+
+    //XXX: Ugly for now
+    function updateCollaborators($vars, &$errors) {
+        global $thisstaff;
+
+        if (!$thisstaff) return;
+
+        //Deletes
+        if($vars['del'] && ($ids=array_filter($vars['del']))) {
+            $collabs = array();
+            foreach ($ids as $k => $cid) {
+                if (($c=Collaborator::lookup($cid))
+                        && $c->getTicketId() == $this->getId()
+                        && $c->remove())
+                     $collabs[] = $c;
+            }
+
+            $this->logNote('Collaborators Removed',
+                    implode("<br>", $collabs), $thisstaff, false);
+        }
+
+        //statuses
+        $cids = null;
+        if($vars['cid'] && ($cids=array_filter($vars['cid']))) {
+            $sql='UPDATE '.TICKET_COLLABORATOR_TABLE
+                .' SET updated=NOW(), isactive=1 '
+                .' WHERE ticket_id='.db_input($this->getId())
+                .' AND id IN('.implode(',', db_input($cids)).')';
+            db_query($sql);
+        }
+
+        $sql='UPDATE '.TICKET_COLLABORATOR_TABLE
+            .' SET updated=NOW(), isactive=0 '
+            .' WHERE ticket_id='.db_input($this->getId());
+        if($cids)
+            $sql.=' AND id NOT IN('.implode(',', db_input($cids)).')';
+
+        db_query($sql);
+
+        unset($this->ht['active_collaborators']);
+        $this->collaborators = null;
+
+        return true;
+    }
 
     /* -------------------- Setters --------------------- */
     function setLastMsgId($msgid) {
@@ -740,27 +865,26 @@ class Ticket {
         /* ------ SEND OUT NEW TICKET AUTORESP && ALERTS ----------*/
 
         $this->reload(); //get the new goodies.
-        $dept= $this->getDept();
-
-        if(!$dept || !($tpl = $dept->getTemplate()))
-            $tpl= $cfg->getDefaultTemplate();
-
-        if(!$tpl) return false;  //bail out...missing stuff.
-
-        if(!$dept || !($email=$dept->getAutoRespEmail()))
-            $email =$cfg->getDefaultEmail();
+        if(!$cfg
+                || !($dept=$this->getDept())
+                || !($tpl = $dept->getTemplate())
+                || !($email=$dept->getAutoRespEmail())) {
+                return false;  //bail out...missing stuff.
+        }
 
         $options = array(
             'inreplyto'=>$message->getEmailMessageId(),
             'references'=>$message->getEmailReferences());
 
         //Send auto response - if enabled.
-        if($autorespond && $email && $cfg->autoRespONNewTicket()
+        if($autorespond
+                && $cfg->autoRespONNewTicket()
                 && $dept->autoRespONNewTicket()
                 &&  ($msg=$tpl->getAutoRespMsgTemplate())) {
 
             $msg = $this->replaceVars($msg->asArray(),
                     array('message' => $message,
+                          'recipient' => $this->getOwner(),
                           'signature' => ($dept && $dept->isPublic())?$dept->getSignature():'')
                     );
 
@@ -771,22 +895,23 @@ class Ticket {
                 null, $options);
         }
 
-        if(!($email=$cfg->getAlertEmail()))
-            $email =$cfg->getDefaultEmail();
-
         //Send alert to out sleepy & idle staff.
-        if($alertstaff && $email
+        if ($alertstaff
                 && $cfg->alertONNewTicket()
+                && ($email=$cfg->getAlertEmail())
                 && ($msg=$tpl->getNewTicketAlertMsgTemplate())) {
 
             $msg = $this->replaceVars($msg->asArray(), array('message' => $message));
 
             $recipients=$sentlist=array();
+            //Exclude the auto responding email just incase it's from staff member.
+            if ($message->isAutoReply())
+                $sentlist[] = $this->getEmail();
+
             //Alert admin??
             if($cfg->alertAdminONNewTicket()) {
-                $alert = str_replace('%{recipient}', 'Admin', $msg['body']);
-                $email->sendAlert($cfg->getAdminEmail(), $msg['subj'],
-                    $alert, null, $options);
+                $alert = $this->replaceVars($msg, array('recipient' => 'Admin'));
+                $email->sendAlert($cfg->getAdminEmail(), $alert['subj'], $alert['body'], null, $options);
                 $sentlist[]=$cfg->getAdminEmail();
             }
 
@@ -801,13 +926,10 @@ class Ticket {
 
             foreach( $recipients as $k=>$staff) {
                 if(!is_object($staff) || !$staff->isAvailable() || in_array($staff->getEmail(), $sentlist)) continue;
-                $alert = str_replace('%{recipient}', $staff->getFirstName(), $msg['body']);
-                $email->sendAlert($staff->getEmail(), $msg['subj'], $alert,
-                    null, $options);
+                $alert = $this->replaceVars($msg, array('recipient' => $staff));
+                $email->sendAlert($staff->getEmail(), $alert['subj'], $alert['body'], null, $options);
                 $sentlist[] = $staff->getEmail();
             }
-
-
         }
 
         return true;
@@ -820,18 +942,14 @@ class Ticket {
         $msg=sprintf('Max open tickets (%d) reached  for %s ', $cfg->getMaxOpenTickets(), $this->getEmail());
         $ost->logWarning('Max. Open Tickets Limit ('.$this->getEmail().')', $msg);
 
-        if(!$sendNotice || !$cfg->sendOverLimitNotice()) return true;
+        if(!$sendNotice || !$cfg->sendOverLimitNotice())
+            return true;
 
         //Send notice to user.
-        $dept = $this->getDept();
-
-        if(!$dept || !($tpl=$dept->getTemplate()))
-            $tpl=$cfg->getDefaultTemplate();
-
-        if(!$dept || !($email=$dept->getAutoRespEmail()))
-            $email=$cfg->getDefaultEmail();
-
-        if($tpl && ($msg=$tpl->getOverlimitMsgTemplate()) && $email) {
+        if(($dept = $this->getDept())
+            && ($tpl=$dept->getTemplate())
+            && ($msg=$tpl->getOverlimitMsgTemplate())
+            && ($email=$dept->getAutoRespEmail())) {
 
             $msg = $this->replaceVars($msg->asArray(),
                         array('signature' => ($dept && $dept->isPublic())?$dept->getSignature():''));
@@ -839,11 +957,11 @@ class Ticket {
             $email->sendAutoReply($this->getEmail(), $msg['subj'], $msg['body']);
         }
 
-        $client= $this->getClient();
+        $user = $this->getOwner();
 
         //Alert admin...this might be spammy (no option to disable)...but it is helpful..I think.
         $alert='Max. open tickets reached for '.$this->getEmail()."\n"
-              .'Open ticket: '.$client->getNumOpenTickets()."\n"
+              .'Open ticket: '.$user->getNumOpenTickets()."\n"
               .'Max Allowed: '.$cfg->getMaxOpenTickets()."\n\nNotice sent to the user.";
 
         $ost->alertAdmin('Overlimit Notice', $alert);
@@ -852,10 +970,61 @@ class Ticket {
     }
 
     function onResponse() {
-        db_query('UPDATE '.TICKET_TABLE.' SET isanswered=1,lastresponse=NOW(), updated=NOW() WHERE ticket_id='.db_input($this->getId()));
+        db_query('UPDATE '.TICKET_TABLE.' SET isanswered=1, lastresponse=NOW(), updated=NOW() WHERE ticket_id='.db_input($this->getId()));
+        $this->reload();
     }
 
-    function onMessage($autorespond=true, $message=null) {
+    /*
+     * Notify collaborators on response or new message
+     *
+     */
+
+    function  notifyCollaborators($entry) {
+        global $cfg;
+
+        if (!$entry instanceof ThreadEntry
+                || !($recipients=$this->getRecipients())
+                || !($dept=$this->getDept())
+                || !($tpl=$dept->getTemplate())
+                || !($msg=$tpl->getActivityNoticeMsgTemplate())
+                || !($email=$dept->getEmail()))
+            return;
+
+        //Who posted the entry?
+        $uid = 0;
+        if ($entry instanceof Message) {
+            $poster = $entry->getUser();
+            // Skip the person who sent in the message
+            $uid = $entry->getUserId();
+        } else {
+            $poster = $entry->getStaff();
+            // Skip the ticket owner
+            $uid = $this->getUserId();
+        }
+
+        $vars = array(
+                'message' => (string) $entry,
+                'poster' => $poster? $poster : 'A collaborator');
+
+        $msg = $this->replaceVars($msg->asArray(), $vars);
+
+        if ($cfg->stripQuotedReply() && ($tag=$cfg->getReplySeparator()))
+            $msg['body'] = "<p style=\"display:none\">$tag<p>".$msg['body'];
+
+        $attachments = $cfg->emailAttachments()?$entry->getAttachments():array();
+        $options = array('inreplyto' => $entry->getEmailMessageId());
+        foreach ($recipients as $recipient) {
+            if ($uid == $recipient->getId()) continue;
+            $options['references'] =  $entry->getEmailReferencesForUser($recipient);
+            $notice = $this->replaceVars($msg, array('recipient' => $recipient));
+            $email->send($recipient->getEmail(), $notice['subj'], $notice['body'], $attachments,
+                $options);
+        }
+
+        return;
+    }
+
+    function onMessage($message, $autorespond=true) {
         global $cfg;
 
         db_query('UPDATE '.TICKET_TABLE.' SET isanswered=0,lastmessage=NOW() WHERE ticket_id='.db_input($this->getId()));
@@ -872,39 +1041,40 @@ class Ticket {
         if($this->isClosed()) $this->reopen(); //reopen..
 
        /**********   double check auto-response  ************/
-        if($autorespond && (Email::getIdByEmail($this->getEmail())))
+        if (!($user = $message->getUser()))
             $autorespond=false;
-        elseif($autorespond && ($dept=$this->getDept()))
+        elseif ($autorespond && (Email::getIdByEmail($user->getEmail())))
+            $autorespond=false;
+        elseif ($autorespond && ($dept=$this->getDept()))
             $autorespond=$dept->autoRespONNewMessage();
 
 
-        if(!$autorespond || !$cfg->autoRespONNewMessage()) return;  //no autoresp or alerts.
+        if(!$autorespond
+                || !$cfg->autoRespONNewMessage()
+                || !$message) return;  //no autoresp or alerts.
 
         $this->reload();
-
-
-        if(!$dept || !($tpl = $dept->getTemplate()))
-            $tpl = $cfg->getDefaultTemplate();
-
-        if(!$dept || !($email = $dept->getAutoRespEmail()))
-            $email = $cfg->getDefaultEmail();
+        $dept = $this->getDept();
+        $email = $dept->getAutoRespEmail();
 
         //If enabled...send confirmation to user. ( New Message AutoResponse)
-        if($email && $tpl && ($msg=$tpl->getNewMessageAutorepMsgTemplate())) {
+        if($email
+                && ($tpl=$dept->getTemplate())
+                && ($msg=$tpl->getNewMessageAutorepMsgTemplate())) {
 
             $msg = $this->replaceVars($msg->asArray(),
-                            array('signature' => ($dept && $dept->isPublic())?$dept->getSignature():''));
+                            array(
+                                'recipient' => $user,
+                                'signature' => ($dept && $dept->isPublic())?$dept->getSignature():''));
 
             //Reply separator tag.
             if($cfg->stripQuotedReply() && ($tag=$cfg->getReplySeparator()))
                 $msg['body'] = "<p style=\"display:none\">$tag<p>".$msg['body'];
 
-            if (!$message)
-                $message = $this->getLastMessage();
             $options = array(
-                'inreplyto'=>$message->getEmailMessageId(),
-                'references'=>$message->getEmailReferences());
-            $email->sendAutoReply($this->getEmail(), $msg['subj'], $msg['body'],
+                'inreplyto' => $message->getEmailMessageId(),
+                'references' => $message->getEmailReferencesForUser($user));
+            $email->sendAutoReply($user->getEmail(), $msg['subj'], $msg['body'],
                 null, $options);
         }
     }
@@ -930,14 +1100,10 @@ class Ticket {
         if(!$alert || !$cfg->alertONAssignment()) return true; //No alerts!
 
         $dept = $this->getDept();
-
-        //Get template.
-        if(!$dept || !($tpl = $dept->getTemplate()))
-            $tpl = $cfg->getDefaultTemplate();
-
-        //Email to use!
-        if(!($email=$cfg->getAlertEmail()))
-            $email = $cfg->getDefaultEmail();
+        if(!$dept
+                || !($tpl = $dept->getTemplate())
+                || !($email = $cfg->getAlertEmail()))
+            return true;
 
         //recipients
         $recipients=array();
@@ -952,7 +1118,7 @@ class Ticket {
         }
 
         //Get the message template
-        if($email && $recipients && $tpl && ($msg=$tpl->getAssignedAlertMsgTemplate())) {
+        if($recipients && ($msg=$tpl->getAssignedAlertMsgTemplate())) {
 
             $msg = $this->replaceVars($msg->asArray(),
                         array('comments' => $comments,
@@ -967,9 +1133,8 @@ class Ticket {
                 'references'=>$note->getEmailReferences());
             foreach( $recipients as $k=>$staff) {
                 if(!is_object($staff) || !$staff->isAvailable() || in_array($staff->getEmail(), $sentlist)) continue;
-                $alert = str_replace('%{recipient}', $staff->getFirstName(), $msg['body']);
-                $email->sendAlert($staff->getEmail(), $msg['subj'], $alert,
-                    null, $options);
+                $alert = $this->replaceVars($msg, array('recipient' => $staff));
+                $email->sendAlert($staff->getEmail(), $alert['subj'], $alert['body'], null, $options);
                 $sentlist[] = $staff->getEmail();
             }
         }
@@ -984,20 +1149,15 @@ class Ticket {
             $whine = false;
 
         //check if we need to send alerts.
-        if(!$whine || !$cfg->alertONOverdueTicket())
+        if(!$whine
+                || !$cfg->alertONOverdueTicket()
+                || !($dept = $this->getDept()))
             return true;
 
-        $dept = $this->getDept();
-        //Get department-defined or default template.
-        if(!$dept || !($tpl = $dept->getTemplate()))
-            $tpl= $cfg->getDefaultTemplate();
-
-        //Email to use!
-        if(!($email=$cfg->getAlertEmail()))
-            $email =$cfg->getDefaultEmail();
-
         //Get the message template
-        if($tpl && ($msg=$tpl->getOverdueAlertMsgTemplate()) && $email) {
+        if(($tpl = $dept->getTemplate())
+                && ($msg=$tpl->getOverdueAlertMsgTemplate())
+                && ($email=$cfg->getAlertEmail())) {
 
             $msg = $this->replaceVars($msg->asArray(),
                 array('comments' => $comments));
@@ -1022,9 +1182,8 @@ class Ticket {
             $sentlist=array();
             foreach( $recipients as $k=>$staff) {
                 if(!is_object($staff) || !$staff->isAvailable() || in_array($staff->getEmail(), $sentlist)) continue;
-                $alert = str_replace("%{recipient}", $staff->getFirstName(), $msg['body']);
-                $email->sendAlert($staff->getEmail(), $msg['subj'], $alert,
-                    null);
+                $alert = $this->replaceVars($msg, array('recipient' => $staff));
+                $email->sendAlert($staff->getEmail(), $alert['subj'], $alert['body'], null);
                 $sentlist[] = $staff->getEmail();
             }
 
@@ -1093,6 +1252,7 @@ class Ticket {
                 return $this->getOwner();
                 break;
             default:
+                $tag = mb_strtolower($tag);
                 if (isset($this->_answers[$tag]))
                     // The answer object is retrieved here which will
                     // automatically invoke the toString() method when the
@@ -1191,19 +1351,12 @@ class Ticket {
         $this->logEvent('transferred');
 
         //Send out alerts if enabled AND requested
-        if(!$alert || !$cfg->alertONTransfer() || !($dept=$this->getDept())) return true; //no alerts!!
+        if(!$alert || !$cfg->alertONTransfer() || !($dept=$this->getDept()))
+            return true; //no alerts!!
 
-
-         //Get template.
-         if(!($tpl = $dept->getTemplate()))
-             $tpl= $cfg->getDefaultTemplate();
-
-         //Email to use!
-         if(!($email=$cfg->getAlertEmail()))
-             $email =$cfg->getDefaultEmail();
-
-         //Get the message template
-         if($tpl && ($msg=$tpl->getTransferAlertMsgTemplate()) && $email) {
+         if(($email=$cfg->getAlertEmail())
+                     && ($tpl = $dept->getTemplate())
+                     && ($msg=$tpl->getTransferAlertMsgTemplate())) {
 
             $msg = $this->replaceVars($msg->asArray(),
                 array('comments' => $comments, 'staff' => $thisstaff));
@@ -1231,9 +1384,8 @@ class Ticket {
                 'references'=>$note->getEmailReferences());
             foreach( $recipients as $k=>$staff) {
                 if(!is_object($staff) || !$staff->isAvailable() || in_array($staff->getEmail(), $sentlist)) continue;
-                $alert = str_replace('%{recipient}', $staff->getFirstName(), $msg['body']);
-                $email->sendAlert($staff->getEmail(), $msg['subj'], $alert,
-                    null, $options);
+                $alert = $this->replaceVars($msg, array('recipient' => $staff));
+                $email->sendAlert($staff->getEmail(), $alert['subj'], $alert['body'], null, $options);
                 $sentlist[] = $staff->getEmail();
             }
          }
@@ -1336,11 +1488,20 @@ class Ticket {
 
         $this->ht['user_id'] = $user->getId();
         $this->user = null;
+        $this->collaborators = null;
+        $this->recipients = null;
 
-        $this->logNote('Ticket ownership changed',
-                Format::htmlchars( sprintf('%s changed ticket ownership to %s',
-                    $thisstaff->getName(), $user->getName()))
-                );
+        //Log an internal note
+        $note = sprintf('%s changed ticket ownership to %s',
+                $thisstaff->getName(), $user->getName());
+
+        //Remove the new owner from list of collaborators
+        $c = Collaborator::lookup(array('userId' => $user->getId(),
+                    'ticketId' => $this->getId()));
+        if ($c && $c->remove())
+            $note.= ' (removed as collaborator)';
+
+        $this->logNote('Ticket ownership changed', $note);
 
         return true;
     }
@@ -1349,14 +1510,7 @@ class Ticket {
     function postMessage($vars, $origin='', $alerts=true) {
         global $cfg;
 
-        //Strip quoted reply...on emailed replies
-        if(!strcasecmp($origin, 'Email')
-                && $cfg->stripQuotedReply()
-                && ($tag=$cfg->getReplySeparator())
-                && strpos($vars['message'], $tag))
-            if((list($msg) = explode($tag, $vars['message'], 2)) && trim($msg))
-                $vars['message'] = $msg;
-
+        $vars['origin'] = $origin;
         if(isset($vars['ip']))
             $vars['ip_address'] = $vars['ip'];
         elseif(!$vars['ip_address'] && $_SERVER['REMOTE_ADDR'])
@@ -1368,26 +1522,60 @@ class Ticket {
 
         $this->setLastMsgId($message->getId());
 
+        //Add email recipients as collaborators...
+        if ($vars['recipients']
+                //Only add if we have a matched local address
+                && $vars['emailId']) {
+            //New collaborators added by other collaborators are disable --
+            // requires staff approval.
+            $info = array(
+                    'isactive' => ($message->getUserId() == $this->getUserId())? 1: 0);
+            $collabs = array();
+            foreach ($vars['recipients'] as $recipient) {
+                // Skip virtual delivered-to addresses
+                if (strcasecmp($recipient['source'], 'delivered-to') === 0)
+                    continue;
+
+                if (($user=User::fromVars($recipient)))
+                    if ($c=$this->addCollaborator($user, $info, $errors))
+                        $collabs[] = sprintf('%s%s',
+                                (string) $c,
+                                $recipient['source'] ? " via {$recipient['source']}" : ''
+                                );
+            }
+            //TODO: Can collaborators add others?
+            if ($collabs) {
+                //TODO: Change EndUser to name of  user.
+                $this->logNote('Collaborators added by enduser',
+                        implode("<br>", $collabs), 'EndUser', false);
+            }
+        }
+
         if(!$alerts) return $message; //Our work is done...
 
         $autorespond = true;
-        if ($autorespond && $message->isAutoResponse())
+        if ($autorespond && $message->isBounceOrAutoReply())
             $autorespond=false;
 
-        $this->onMessage($autorespond, $message); //must be called b4 sending alerts to staff.
+        $this->onMessage($message, $autorespond); //must be called b4 sending alerts to staff.
 
         $dept = $this->getDept();
 
-        if(!$dept || !($tpl = $dept->getTemplate()))
-            $tpl= $cfg->getDefaultTemplate();
 
-        if(!($email=$cfg->getAlertEmail()))
-            $email =$cfg->getDefaultEmail();
-
+        $variables = array(
+                'message' => $message,
+                'poster' => ($vars['poster'] ? $vars['poster'] : $this->getName())
+                );
+        $options = array(
+                'inreplyto' => $message->getEmailMessageId(),
+                'references' => $message->getEmailReferences());
         //If enabled...send alert to staff (New Message Alert)
-        if($cfg->alertONNewMessage() && $tpl && $email && ($msg=$tpl->getNewMessageAlertMsgTemplate())) {
+        if($cfg->alertONNewMessage()
+                && ($email = $cfg->getAlertEmail())
+                && ($tpl = $dept->getTemplate())
+                && ($msg = $tpl->getNewMessageAlertMsgTemplate())) {
 
-            $msg = $this->replaceVars($msg->asArray(), array('message' => $message));
+            $msg = $this->replaceVars($msg->asArray(), $variables);
 
             //Build list of recipients and fire the alerts.
             $recipients=array();
@@ -1405,17 +1593,15 @@ class Ticket {
                 $recipients[]=$manager;
 
             $sentlist=array(); //I know it sucks...but..it works.
-            $options = array(
-                'inreplyto'=>$message->getEmailMessageId(),
-                'references'=>$message->getEmailReferences());
             foreach( $recipients as $k=>$staff) {
                 if(!$staff || !$staff->getEmail() || !$staff->isAvailable() || in_array($staff->getEmail(), $sentlist)) continue;
-                $alert = str_replace('%{recipient}', $staff->getFirstName(), $msg['body']);
-                $email->sendAlert($staff->getEmail(), $msg['subj'], $alert,
-                    null, $options);
+                $alert = $this->replaceVars($msg, array('recipient' => $staff));
+                $email->sendAlert($staff->getEmail(), $alert['subj'], $alert['body'], null, $options);
                 $sentlist[] = $staff->getEmail();
             }
         }
+
+        $this->notifyCollaborators($message);
 
         return $message;
     }
@@ -1445,13 +1631,9 @@ class Ticket {
 
         $dept = $this->getDept();
 
-        if(!($tpl = $dept->getTemplate()))
-            $tpl= $cfg->getDefaultTemplate();
-
-        if(!$dept || !($email=$dept->getEmail()))
-            $email = $cfg->getDefaultEmail();
-
-        if($tpl && ($msg=$tpl->getAutoReplyMsgTemplate()) && $email) {
+        if(($email=$dept->getEmail())
+                && ($tpl = $dept->getTemplate())
+                && ($msg=$tpl->getAutoReplyMsgTemplate())) {
 
             if($dept && $dept->isPublic())
                 $signature=$dept->getSignature();
@@ -1481,7 +1663,7 @@ class Ticket {
 
 
         if(!$vars['poster'] && $thisstaff)
-            $vars['poster'] = $thisstaff->getName();
+            $vars['poster'] = $thisstaff;
 
         if(!$vars['staffId'] && $thisstaff)
             $vars['staffId'] = $thisstaff->getId();
@@ -1498,44 +1680,44 @@ class Ticket {
             $this->setStaffId($thisstaff->getId()); //direct assignment;
 
         $this->onResponse(); //do house cleaning..
-        $this->reload();
 
         /* email the user??  - if disabled - the bail out */
         if(!$alert) return $response;
 
         $dept = $this->getDept();
 
-        if(!($tpl = $dept->getTemplate()))
-            $tpl= $cfg->getDefaultTemplate();
+        if($thisstaff && $vars['signature']=='mine')
+            $signature=$thisstaff->getSignature();
+        elseif($vars['signature']=='dept' && $dept && $dept->isPublic())
+            $signature=$dept->getSignature();
+        else
+            $signature='';
 
-        if(!$dept || !($email=$dept->getEmail()))
-            $email = $cfg->getDefaultEmail();
+        $variables = array(
+                'response' => $response,
+                'signature' => $signature,
+                'staff' => $thisstaff,
+                'poster' => $thisstaff);
+        $options = array(
+                'inreplyto' => $response->getEmailMessageId(),
+                'references' => $response->getEmailReferences());
 
-        if($tpl && ($msg=$tpl->getReplyMsgTemplate()) && $email) {
-
-            if($thisstaff && $vars['signature']=='mine')
-                $signature=$thisstaff->getSignature();
-            elseif($vars['signature']=='dept' && $dept && $dept->isPublic())
-                $signature=$dept->getSignature();
-            else
-                $signature='';
-
-            //Set attachments if emailing.
-            $attachments = $cfg->emailAttachments()?$response->getAttachments():array();
+        if(($email=$dept->getEmail())
+                && ($tpl = $dept->getTemplate())
+                && ($msg=$tpl->getReplyMsgTemplate())) {
 
             $msg = $this->replaceVars($msg->asArray(),
-                    array('response' => $response, 'signature' => $signature, 'staff' => $thisstaff));
+                    $variables + array('recipient' => $this->getOwner()));
 
             if($cfg->stripQuotedReply() && ($tag=$cfg->getReplySeparator()))
                 $msg['body'] = "<p style=\"display:none\">$tag<p>".$msg['body'];
-
-            $options = array(
-                'inreplyto' => $response->getEmailMessageId(),
-                'references' => $response->getEmailReferences());
-            //TODO: setup  5 param (options... e.g mid trackable on replies)
+            $attachments = $cfg->emailAttachments()?$response->getAttachments():array();
             $email->send($this->getEmail(), $msg['subj'], $msg['body'], $attachments,
                 $options);
         }
+
+        if($vars['emailcollab'])
+            $this->notifyCollaborators($response);
 
         return $response;
     }
@@ -1577,11 +1759,19 @@ class Ticket {
     function logNote($title, $note, $poster='SYSTEM', $alert=true) {
 
         $errors = array();
+        //Unless specified otherwise, assume HTML
+        if ($note && is_string($note))
+            $note = new HtmlThreadBody($note);
+
         return $this->postNote(
-                array('title' => $title, 'note' => $note),
+                array(
+                    'title' => $title,
+                    'note' => $note,
+                ),
                 $errors,
                 $poster,
-                $alert);
+                $alert
+        );
     }
 
     function postNote($vars, &$errors, $poster, $alert=true) {
@@ -1610,14 +1800,9 @@ class Ticket {
         if(!$alert || !$cfg->alertONNewNote() || !($dept=$this->getDept()))
             return $note;
 
-        if(!($tpl = $dept->getTemplate()))
-            $tpl= $cfg->getDefaultTemplate();
-
-        if(!($email=$cfg->getAlertEmail()))
-            $email =$cfg->getDefaultEmail();
-
-
-        if($tpl && ($msg=$tpl->getNoteAlertMsgTemplate()) && $email) {
+        if(($email=$cfg->getAlertEmail())
+                && ($tpl = $dept->getTemplate())
+                && ($msg=$tpl->getNoteAlertMsgTemplate())) {
 
             $msg = $this->replaceVars($msg->asArray(),
                 array('note' => $note));
@@ -1647,9 +1832,8 @@ class Ticket {
                         || in_array($staff->getEmail(), $sentlist) //No duplicates.
                         || $note->getStaffId() == $staff->getId())  //No need to alert the poster!
                     continue;
-                $alert = str_replace('%{recipient}', $staff->getFirstName(), $msg['body']);
-                $email->sendAlert($staff->getEmail(), $msg['subj'], $alert, null,
-                    $options);
+                $alert = $this->replaceVars($msg, array('recipient' => $staff));
+                $email->sendAlert($staff->getEmail(), $alert['subj'], $alert['body'], null, $options);
                 $sentlist[] = $staff->getEmail();
             }
         }
@@ -1661,7 +1845,7 @@ class Ticket {
     function pdfExport($psize='Letter', $notes=false) {
         require_once(INCLUDE_DIR.'class.pdf.php');
         $pdf = new Ticket2PDF($this, $psize, $notes);
-        $name='Ticket-'.$this->getExtId().'.pdf';
+        $name='Ticket-'.$this->getNumber().'.pdf';
         $pdf->Output($name, 'I');
         //Remember what the user selected - for autoselect on the next print.
         $_SESSION['PAPER_SIZE'] = $psize;
@@ -1763,15 +1947,15 @@ class Ticket {
 
 
    /*============== Static functions. Use Ticket::function(params); =============nolint*/
-    function getIdByExtId($extId, $email=null) {
+    function getIdByNumber($number, $email=null) {
 
-        if(!$extId || !is_numeric($extId))
+        if(!$number)
             return 0;
 
         $sql ='SELECT ticket.ticket_id FROM '.TICKET_TABLE.' ticket '
              .' LEFT JOIN '.USER_TABLE.' user ON user.id = ticket.user_id'
              .' LEFT JOIN '.USER_EMAIL_TABLE.' email ON user.id = email.user_id'
-             .' WHERE ticket.ticketID='.db_input($extId);
+             .' WHERE ticket.`number`='.db_input($number);
 
         if($email)
             $sql .= ' AND email.address = '.db_input($email);
@@ -1792,20 +1976,20 @@ class Ticket {
             ?$ticket:null;
     }
 
-    function lookupByExtId($id, $email=null) {
-        return self::lookup(self:: getIdByExtId($id, $email));
+    function lookupByNumber($number, $email=null) {
+        return self::lookup(self:: getIdByNumber($number, $email));
     }
 
-    function genExtRandID() {
-        global $cfg;
+    function genRandTicketNumber($len = EXT_TICKET_ID_LEN) {
 
-        //We can allow collissions...extId and email must be unique ...so same id with diff emails is ok..
-        // But for clarity...we are going to make sure it is unique.
-        $id=Misc::randNumber(EXT_TICKET_ID_LEN);
-        if(db_num_rows(db_query('SELECT ticket_id FROM '.TICKET_TABLE.' WHERE ticketID='.db_input($id))))
-            return Ticket::genExtRandID();
+        //We can allow collissions...number and email must be unique ...so
+        // same number with diff emails is ok.. But for clarity...we are going to make sure it is unique.
+        $number = Misc::randNumber($len);
+        if(db_num_rows(db_query('SELECT ticket_id FROM '.TICKET_TABLE.'
+                        WHERE `number`='.db_input($number))))
+            return Ticket::genRandTicketNumber($len);
 
-        return $id;
+        return $number;
     }
 
     function getIdByMessageId($mid, $email) {
@@ -1886,11 +2070,8 @@ class Ticket {
     /* Quick client's tickets stats
        @email - valid email.
      */
-    function getClientStats($email) {
-
-        if(!$email || !Validator::is_email($email))
-            return null;
-        if (!$user = User::lookup(array('emails__address'=>$email)))
+    function getUserStats($user) {
+        if(!$user || !($user instanceof EndUser))
             return null;
 
         $sql='SELECT count(open.ticket_id) as open, count(closed.ticket_id) as closed '
@@ -1940,8 +2121,8 @@ class Ticket {
 
             //Make sure the open ticket limit hasn't been reached. (LOOP CONTROL)
             if($cfg->getMaxOpenTickets()>0 && strcasecmp($origin,'staff')
-                    && ($client=Client::lookupByEmail($vars['email']))
-                    && ($openTickets=$client->getNumOpenTickets())
+                    && ($user=TicketUser::lookupByEmail($vars['email']))
+                    && ($openTickets=$user->getNumOpenTickets())
                     && ($openTickets>=$cfg->getMaxOpenTickets()) ) {
 
                 $errors['err']="You've reached the maximum open tickets allowed.";
@@ -1998,13 +2179,13 @@ class Ticket {
 
         $id=0;
         $fields=array();
-        $fields['message']  = array('type'=>'text',     'required'=>1, 'error'=>'Message required');
+        $fields['message']  = array('type'=>'*',     'required'=>1, 'error'=>'Message required');
         switch (strtolower($origin)) {
             case 'web':
                 $fields['topicId']  = array('type'=>'int',  'required'=>1, 'error'=>'Select help topic');
                 break;
             case 'staff':
-                $fields['deptId']   = array('type'=>'int',  'required'=>1, 'error'=>'Dept. required');
+                $fields['deptId']   = array('type'=>'int',  'required'=>0, 'error'=>'Dept. required');
                 $fields['topicId']  = array('type'=>'int',  'required'=>1, 'error'=>'Topic required');
                 $fields['duedate']  = array('type'=>'date', 'required'=>0, 'error'=>'Invalid date - must be MM/DD/YY');
             case 'api':
@@ -2041,7 +2222,7 @@ class Ticket {
             if (!$user) {
                 $user_form = UserForm::getUserForm()->getForm($vars);
                 if (!$user_form->isValid($field_filter)
-                        || !($user=User::fromForm($user_form->getClean())))
+                        || !($user=User::fromVars($user_form->getClean())))
                     $errors['user'] = 'Incomplete client information';
             }
         }
@@ -2052,6 +2233,10 @@ class Ticket {
         # Some things will need to be unpacked back into the scope of this
         # function
         if (isset($vars['autorespond'])) $autorespond=$vars['autorespond'];
+
+        # Apply filter-specific priority
+        if ($vars['priorityId'])
+            $form->setAnswer('priority', null, $vars['priorityId']);
 
         // OK...just do it.
         $deptId=$vars['deptId']; //pre-selected Dept if any.
@@ -2096,15 +2281,18 @@ class Ticket {
         $ipaddress=$vars['ip']?$vars['ip']:$_SERVER['REMOTE_ADDR'];
 
         //We are ready son...hold on to the rails.
-        $extId=Ticket::genExtRandID();
+        $number = Ticket::genRandTicketNumber();
         $sql='INSERT INTO '.TICKET_TABLE.' SET created=NOW() '
             .' ,lastmessage= NOW()'
             .' ,user_id='.db_input($user->id)
-            .' ,ticketID='.db_input($extId)
+            .' ,`number`='.db_input($number)
             .' ,dept_id='.db_input($deptId)
             .' ,topic_id='.db_input($topicId)
             .' ,ip_address='.db_input($ipaddress)
             .' ,source='.db_input($source);
+
+        if (isset($vars['emailId']) && $vars['emailId'])
+            $sql.=', email_id='.db_input($vars['emailId']);
 
         //Make sure the origin is staff - avoid firebug hack!
         if($vars['duedate'] && !strcasecmp($origin,'staff'))
@@ -2117,9 +2305,9 @@ class Ticket {
         /* -------------------- POST CREATE ------------------------ */
 
         if(!$cfg->useRandomIds()) {
-            //Sequential ticketIDs support really..really suck arse.
-            $extId=$id; //To make things really easy we are going to use autoincrement ticket_id.
-            db_query('UPDATE '.TICKET_TABLE.' SET ticketID='.db_input($extId).' WHERE ticket_id='.$id.' LIMIT 1');
+            //Sequential ticket number support really..really suck arse.
+            //To make things really easy we are going to use autoincrement ticket_id.
+            db_query('UPDATE '.TICKET_TABLE.' SET `number`='.db_input($id).' WHERE ticket_id='.$id.' LIMIT 1');
             //TODO: RETHING what happens if this fails?? [At the moment on failure random ID is used...making stuff usable]
         }
 
@@ -2133,6 +2321,7 @@ class Ticket {
         //post the message.
         unset($vars['cannedattachments']); //Ticket::open() might have it set as part of  open & respond.
         $vars['title'] = $vars['subject']; //Use the initial subject as title of the post.
+        $vars['userId'] = $ticket->getUserId();
         $message = $ticket->postMessage($vars , $origin, false);
 
         // Configure service-level-agreement for this ticket
@@ -2151,15 +2340,8 @@ class Ticket {
 
         # Messages that are clearly auto-responses from email systems should
         # not have a return 'ping' message
-        if ($autorespond && $message && $message->isAutoResponse())
-            $autorespond=false;
-
-        //Don't auto respond to mailer daemons.
-        if( $autorespond &&
-            (strpos(strtolower($vars['email']),'mailer-daemon@')!==false
-             || strpos(strtolower($vars['email']),'postmaster@')!==false)) {
-            $autorespond=false;
-        }
+        if ($autorespond && $message->isAutoReply())
+            $autorespond = false;
 
         //post canned auto-response IF any (disables new ticket auto-response).
         if ($vars['cannedResponseId']
@@ -2173,13 +2355,18 @@ class Ticket {
         if($autorespond && $dept && !$dept->autoRespONNewTicket())
             $autorespond=false;
 
+        //Don't send alerts to staff when the message is a bounce
+        //  this is necessary to avoid possible loop (especially on new ticket)
+        if ($alertstaff && $message->isBounce())
+            $alertstaff = false;
+
         /***** See if we need to send some alerts ****/
         $ticket->onNewTicket($message, $autorespond, $alertstaff);
 
         /************ check if the user JUST reached the max. open tickets limit **********/
         if($cfg->getMaxOpenTickets()>0
-                    && ($client=$ticket->getClient())
-                    && ($client->getNumOpenTickets()==$cfg->getMaxOpenTickets())) {
+                    && ($user=$ticket->getOwner())
+                    && ($user->getNumOpenTickets()==$cfg->getMaxOpenTickets())) {
             $ticket->onOpenLimit(($autorespond && strcasecmp($origin, 'staff')));
         }
 
@@ -2235,19 +2422,15 @@ class Ticket {
 
         $ticket->reload();
 
-        if(!$cfg->notifyONNewStaffTicket() || !isset($vars['alertuser']))
+        if(!$cfg->notifyONNewStaffTicket()
+                || !isset($vars['alertuser'])
+                || !($dept=$ticket->getDept()))
             return $ticket; //No alerts.
 
         //Send Notice to user --- if requested AND enabled!!
-
-        $dept=$ticket->getDept();
-        if(!$dept || !($tpl=$dept->getTemplate()))
-            $tpl=$cfg->getDefaultTemplate();
-
-        if(!$dept || !($email=$dept->getEmail()))
-            $email =$cfg->getDefaultEmail();
-
-        if($tpl && ($msg=$tpl->getNewTicketNoticeMsgTemplate()) && $email) {
+        if(($tpl=$dept->getTemplate())
+                && ($msg=$tpl->getNewTicketNoticeMsgTemplate())
+                && ($email=$dept->getEmail())) {
 
             $message = $vars['message'];
             if($response) {
@@ -2264,11 +2447,15 @@ class Ticket {
 
             $attachments =($cfg->emailAttachments() && $response)?$response->getAttachments():array();
 
-            $msg = $ticket->replaceVars($msg->asArray(), array(
-                'message' => $message,
-                'signature' => $signature,
-                'response' => ($response) ? $response->getBody() : '',
-            ));
+            $msg = $ticket->replaceVars($msg->asArray(),
+                    array(
+                        'message'   => $message,
+                        'signature' => $signature,
+                        'response'  => ($response) ? $response->getBody() : '',
+                        'recipient' => $ticket->getOwner(), //End user
+                        'staff'     => $thisstaff,
+                        )
+                    );
 
             if($cfg->stripQuotedReply() && ($tag=trim($cfg->getReplySeparator())))
                 $msg['body'] = "<p style=\"display:none\">$tag<p>".$msg['body'];
